@@ -27,7 +27,7 @@ find_focusyn() {
 }
 
 BIN="$(find_focusyn)" || {
-  log "✗ no encuentro el binario 'focusyn'. Instalalo: uv tool install \"git+ssh://git@github.com/Melquiades-Systems/focusyn-packages#subdirectory=cli\""
+  log "✗ no encuentro el binario 'focusyn'. Instalalo: uv tool install \"git+https://github.com/Melquiades-Systems/focusyn-packages#subdirectory=cli\""
   exit 0
 }
 

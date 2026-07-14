@@ -1,0 +1,42 @@
+Copyright (c) 2026 Melquiades Systems. Todos los derechos reservados.
+Copyright (c) 2026 Melquiades Systems. All rights reserved.
+
+SOURCE-AVAILABLE — NO ES OPEN SOURCE / NOT OPEN SOURCE
+
+Español
+-------
+Este repositorio es público para que cualquier persona pueda LEER, AUDITAR e INSTALAR estos
+paquetes (el CLI `focusyn` y el plugin de Claude Code) con el fin de usar el servicio focusyn
+con una credencial emitida por Melquiades Systems.
+
+Se concede permiso para:
+  - leer y auditar el código;
+  - instalarlo y ejecutarlo tal cual, para consumir el servicio focusyn.
+
+NO se concede permiso para copiar, modificar, fusionar, publicar, redistribuir, sublicenciar,
+vender ni crear obras derivadas de este software, ni para usarlo fuera del servicio focusyn, sin
+autorización previa y por escrito de Melquiades Systems.
+
+EL SOFTWARE SE ENTREGA "TAL CUAL", SIN GARANTÍA DE NINGÚN TIPO, EXPRESA O IMPLÍCITA, INCLUIDAS
+—SIN LIMITARSE A ELLAS— LAS GARANTÍAS DE COMERCIABILIDAD, IDONEIDAD PARA UN FIN DETERMINADO Y NO
+INFRACCIÓN. EN NINGÚN CASO LOS AUTORES O TITULARES DEL COPYRIGHT SERÁN RESPONSABLES DE NINGUNA
+RECLAMACIÓN, DAÑO U OTRA RESPONSABILIDAD DERIVADA DEL SOFTWARE O DE SU USO.
+
+English
+-------
+This repository is public so that anyone may READ, AUDIT and INSTALL these packages (the `focusyn`
+CLI and the Claude Code plugin) for the purpose of using the focusyn service with a credential
+issued by Melquiades Systems.
+
+Permission is granted to:
+  - read and audit the source;
+  - install and run it as-is, to consume the focusyn service.
+
+Permission is NOT granted to copy, modify, merge, publish, redistribute, sublicense, sell, or
+create derivative works of this software, nor to use it outside the focusyn service, without the
+prior written consent of Melquiades Systems.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT
+NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+DAMAGES OR OTHER LIABILITY ARISING FROM THE SOFTWARE OR THE USE OF THE SOFTWARE.

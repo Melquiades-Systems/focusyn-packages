@@ -11,7 +11,7 @@ procesos: es un cliente HTTP con un header.
 
 ```bash
 # 1. el CLI (emite tu key de máquina y guarda la credencial en ~/.config/focusyn/config.toml 0600)
-uv tool install "git+ssh://git@github.com/Melquiades-Systems/focusyn-packages#subdirectory=cli"
+uv tool install "git+https://github.com/Melquiades-Systems/focusyn-packages#subdirectory=cli"
 focusyn login                 # tu usuario de la web
 focusyn agent create mcp-$(hostname) --scopes read,propose,apply,sync   # → imprime la API key
 

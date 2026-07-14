@@ -16,7 +16,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 #    Windows: powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 
 # 2. el CLI, desde el repo de paquetes cliente (subdirectorio `cli/`)
-uv tool install "git+ssh://git@github.com/Melquiades-Systems/focusyn-packages#subdirectory=cli"
+uv tool install "git+https://github.com/Melquiades-Systems/focusyn-packages#subdirectory=cli"
 
 # 3. autenticarte: con tu usuario de la web…
 focusyn login

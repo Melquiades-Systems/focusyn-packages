@@ -5,7 +5,7 @@ el gateway de los vaults del ecosistema.
 
 | Paquete | Qué es | Instalación |
 |---|---|---|
-| [`cli/`](cli/) | **`focusyn`**, el CLI cliente (Python, HTTP puro) | `uv tool install "git+ssh://git@github.com/Melquiades-Systems/focusyn-packages#subdirectory=cli"` |
+| [`cli/`](cli/) | **`focusyn`**, el CLI cliente (Python, HTTP puro) | `uv tool install "git+https://github.com/Melquiades-Systems/focusyn-packages#subdirectory=cli"` |
 | [`mcp/`](mcp/) | **plugin de Claude Code**: el MCP remoto + los hooks de memorias | `/plugin marketplace add Melquiades-Systems/focusyn-packages` → `/plugin install focusyn@melquiades` |
 
 ## Por qué existe este repo, y qué NO vive acá
@@ -27,6 +27,22 @@ instalar un repo privado por `git+ssh` en el build y a versionar dos repos para 
 Lo que sí garantiza la frontera, de forma ejecutable, es **`make cli-check`**: el wheel del cliente no
 puede arrastrar ninguna dependencia del gateway (FastAPI, SQLAlchemy, pgvector, pygit2, gRPC, `mcp`…).
 Si alguien mete un import del servidor en el cliente, el guard falla.
+
+## Este repo es PÚBLICO
+
+Lo es a propósito: es el instalable. Se baja sin credenciales de GitHub y el marketplace del plugin
+funciona para cualquiera. Publicarlo **no da acceso a nada** — sin una API key emitida por Melquiades
+Systems, el CLI no puede leer ni escribir un solo documento.
+
+De ahí la regla, que no es opcional:
+
+- **Nada del servidor entra acá.** Ni código del gateway, ni DSNs, ni IPs privadas o de la tailnet, ni
+  nombres de host internos, ni `.env`.
+- **Ninguna credencial, nunca** — ni en tests, ni en un ejemplo del README, ni "de prueba". Las keys
+  viven en `~/.config/focusyn/config.toml` (0600) o en el entorno; los fixtures usan valores
+  evidentemente falsos.
+- La licencia es [source-available](LICENSE), no open source: se puede leer, auditar e instalar; no
+  redistribuir ni derivar.
 
 ## Desarrollo
 
