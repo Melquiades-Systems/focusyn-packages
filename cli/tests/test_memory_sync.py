@@ -27,7 +27,7 @@ from focusyn_cli.memory_sync import (
 
 runner = CliRunner()
 
-_REAL_SLUG = "-home-melquiades-focusyn"  # los slugs reales empiezan con guion
+_REAL_SLUG = "-home-usuario-miproyecto"  # los slugs reales empiezan con guion
 
 
 def _make_project(root: Path, slug: str, files: dict[str, str]) -> MemoryProject:
@@ -273,3 +273,23 @@ def test_cli_sync_invoca_cliente_por_proyecto(
     # Sólo proj-a (filtrado por --project); cliente invocado una vez.
     assert _CLI_CALLS == [("proj-a", True)]
     assert "Total: created=1" in result.stdout
+
+
+def test_collect_ignora_symlinks(tmp_path: Path) -> None:
+    """Un symlink dentro de memory/ NO se sube: sólo se sincroniza lo que vive ahí.
+
+    Sin este filtro, un `ln -s ~/.ssh/config secreto.md` dentro de memory/ pasaba el `is_file()` y
+    su contenido terminaba en el corpus. El `path_prefix` del endpoint acota el DESTINO, no el
+    origen.
+    """
+    secreto = tmp_path / "fuera" / "privado.md"
+    secreto.parent.mkdir(parents=True)
+    secreto.write_text("clave-que-no-debe-subir", encoding="utf-8")
+
+    project = _make_project(tmp_path, "-p", {"real.md": "contenido legítimo"})
+    (project.memory_dir / "robado.md").symlink_to(secreto)
+
+    docs = collect_memory_docs(project)
+
+    assert [rel for rel, _ in docs] == ["-p/real.md"]
+    assert all("clave-que-no-debe-subir" not in content for _, content in docs)

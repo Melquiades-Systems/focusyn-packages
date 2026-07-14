@@ -42,10 +42,10 @@ def test_detecta_lenguajes_por_marcador_en_la_raiz(tmp_path: Path) -> None:
 
 
 def test_monorepo_encuentra_el_marcador_en_un_subdirectorio(tmp_path: Path) -> None:
-    """El gap que D1 vino a cerrar: focusyn tiene el ``package.json`` en ``frontend/``.
+    """El gap que D1 vino a cerrar: en un repo políglota el ``package.json`` vive en ``frontend/``.
 
-    Buscando sólo en la raíz, el CLI devolvía ``["python"]`` y los 72 archivos ``.ts/.tsx`` del
-    frontend NUNCA se analizaban. Lo mismo en gz-procurement y surgicx-platform.
+    Buscando sólo en la raíz, el CLI devolvía ``["python"]`` y los archivos ``.ts/.tsx`` del
+    frontend NUNCA se analizaban.
     """
     (tmp_path / "pyproject.toml").write_text("[project]\nname='x'\n")
     (tmp_path / "frontend").mkdir()
@@ -399,10 +399,10 @@ def test_repo_sin_calibrar_no_analiza_las_dependencias_del_repo(
 ) -> None:
     """Sin config, el path que recibe vulture lo elegimos NOSOTROS — y `.` incluye el virtualenv.
 
-    En ``melquiades-mind`` eso eran 9.971 de 10.097 "candidatos" dentro de ``.venv/`` (dead code de
-    librerías de terceros), y en ``melquiades-embeddings`` un ``SyntaxWarning`` de una dependencia
-    tumbaba la corrida entera. Excluir esos directorios no es calibrar por el repo: es no analizar
-    código que no es suyo.
+    Medido en un repo real, eso eran 9.971 de 10.097 "candidatos" dentro de ``.venv/`` (dead code de
+    librerías de terceros), y en otro un ``SyntaxWarning`` de una dependencia tumbaba la corrida
+    entera. Excluir esos directorios no es calibrar por el repo: es no analizar código que no es
+    suyo.
     """
     (tmp_path / "pyproject.toml").write_text("[project]\nname='x'\n")  # sin [tool.vulture]
     llamadas: list[list[str]] = []

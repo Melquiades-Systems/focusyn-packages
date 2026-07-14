@@ -57,14 +57,14 @@ def _client(
 
 def test_idempotency_key_coincide_con_el_formato_mcp() -> None:
     content = b"binary-bytes"
-    assert content_idempotency_key(content, "lait") == _mcp_key(content, "lait")
+    assert content_idempotency_key(content, "acme") == _mcp_key(content, "acme")
 
 
 def test_idempotency_key_varia_por_contenido_y_por_vault() -> None:
-    assert content_idempotency_key(b"a", "lait") != content_idempotency_key(b"b", "lait")
-    assert content_idempotency_key(b"a", "lait") != content_idempotency_key(b"a", "wiki")
+    assert content_idempotency_key(b"a", "acme") != content_idempotency_key(b"b", "acme")
+    assert content_idempotency_key(b"a", "acme") != content_idempotency_key(b"a", "wiki")
     # 8 <= len <= 128 (lo exige el endpoint).
-    key = content_idempotency_key(b"a", "lait")
+    key = content_idempotency_key(b"a", "acme")
     assert 8 <= len(key) <= 128
 
 
@@ -86,7 +86,7 @@ def test_upload_envia_multipart_y_parsea(tmp_path: Path) -> None:
         return httpx.Response(200, json=_ok_response())
 
     with _client(handler, key="a2a_secret") as client:
-        out = client.upload(f, "lait", doc_id="LAIT-PEND-013", alt="una imagen")
+        out = client.upload(f, "acme", doc_id="ACME-PEND-013", alt="una imagen")
 
     assert captured["path"] == "/v1/write/attachment"
     assert captured["key"] == "a2a_secret"  # header de auth
@@ -97,10 +97,10 @@ def test_upload_envia_multipart_y_parsea(tmp_path: Path) -> None:
     # Campos multipart presentes + el binario streameado (no base64).
     assert b'name="file"; filename="shot.png"' in body
     assert b"\x89PNG" in body
-    assert b'name="vault"' in body and b"lait" in body
-    assert b'name="doc_id"' in body and b"LAIT-PEND-013" in body
+    assert b'name="vault"' in body and b"acme" in body
+    assert b'name="doc_id"' in body and b"ACME-PEND-013" in body
     assert b'name="alt"' in body
-    assert content_idempotency_key(b"\x89PNG", "lait").encode() in body
+    assert content_idempotency_key(b"\x89PNG", "acme").encode() in body
     # Respuesta parseada al schema del gateway.
     assert isinstance(out, AttachmentUploadOut)
     assert out.status == "uploaded"
@@ -117,7 +117,7 @@ def test_upload_infiere_content_type_del_nombre(tmp_path: Path) -> None:
         return httpx.Response(200, json={**_ok_response(), "content_type": "application/pdf"})
 
     with _client(handler) as client:
-        client.upload(f, "lait")
+        client.upload(f, "acme")
     body = seen["body"]
     assert isinstance(body, bytes)
     assert b"application/pdf" in body  # MIME inferido de la extensión
@@ -136,7 +136,7 @@ def test_upload_content_type_explicito_gana(tmp_path: Path) -> None:
         return httpx.Response(200, json=_ok_response())
 
     with _client(handler) as client:
-        client.upload(f, "lait", content_type="image/webp")
+        client.upload(f, "acme", content_type="image/webp")
     body = seen["body"]
     assert isinstance(body, bytes)
     assert b"image/webp" in body
@@ -150,7 +150,7 @@ def test_upload_archivo_vacio_eleva(tmp_path: Path) -> None:
         return httpx.Response(200, json=_ok_response())
 
     with _client(handler) as client, pytest.raises(ValueError, match="vacío"):
-        client.upload(f, "lait")
+        client.upload(f, "acme")
 
 
 def test_upload_archivo_inexistente_eleva(tmp_path: Path) -> None:
@@ -158,7 +158,7 @@ def test_upload_archivo_inexistente_eleva(tmp_path: Path) -> None:
         return httpx.Response(200, json=_ok_response())
 
     with _client(handler) as client, pytest.raises(FileNotFoundError):
-        client.upload(tmp_path / "no-existe.png", "lait")
+        client.upload(tmp_path / "no-existe.png", "acme")
 
 
 def test_upload_eleva_en_error_http(tmp_path: Path) -> None:
@@ -169,7 +169,7 @@ def test_upload_eleva_en_error_http(tmp_path: Path) -> None:
         return httpx.Response(403, json={"error": {"code": "AUTH_INSUFFICIENT_SCOPE"}})
 
     with _client(handler) as client, pytest.raises(httpx.HTTPStatusError) as exc:
-        client.upload(f, "lait")
+        client.upload(f, "acme")
     assert exc.value.response.status_code == 403
 
 
@@ -182,7 +182,7 @@ def test_cli_sin_api_key_falla(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("FOCUSYN_GATEWAY_URL", "http://gw:7415")  # gateway sí, key no
     f = tmp_path / "shot.png"
     f.write_bytes(b"x")
-    result = runner.invoke(app, ["attachment", "upload", "--file", str(f), "--vault", "lait"])
+    result = runner.invoke(app, ["attachment", "upload", "--file", str(f), "--vault", "acme"])
     assert result.exit_code != 0
     assert "api-key" in (result.stdout + str(result.output)).lower()
 
@@ -233,9 +233,9 @@ def test_cli_upload_invoca_cliente_y_muestra_markdown_ref(
             "--file",
             str(f),
             "--vault",
-            "lait",
+            "acme",
             "--doc-id",
-            "LAIT-PEND-013",
+            "ACME-PEND-013",
             "--gateway-url",
             "http://gw:7415",
             "--api-key",
@@ -243,6 +243,6 @@ def test_cli_upload_invoca_cliente_y_muestra_markdown_ref(
         ],
     )
     assert result.exit_code == 0, result.stdout
-    assert _CLI_UPLOADS == [("evidencia.png", "lait", "LAIT-PEND-013")]
+    assert _CLI_UPLOADS == [("evidencia.png", "acme", "ACME-PEND-013")]
     # El markdown_ref se imprime (lo único que el agente pega en la nota).
     assert "![alt](/v1/attachment/" in result.stdout

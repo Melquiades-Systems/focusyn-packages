@@ -58,7 +58,7 @@ def discover_projects(projects_root: Path) -> list[MemoryProject]:
     """Lista los proyectos bajo ``projects_root`` que tienen un ``memory/``.
 
     El slug es el nombre del directorio del proyecto (p. ej.
-    ``-home-melquiades-focusyn``). Orden estable por slug (determinista).
+    ``-home-usuario-miproyecto``). Orden estable por slug (determinista).
     """
     if not projects_root.is_dir():
         return []
@@ -80,8 +80,12 @@ def collect_memory_docs(project: MemoryProject) -> list[tuple[str, str]]:
     """
     docs: list[tuple[str, str]] = []
     for md in sorted(project.memory_dir.rglob("*.md")):
+        if md.is_symlink():
+            continue  # un symlink a ~/.ssh/config pasa `is_file()` y su contenido acabaría en el
+            # corpus: acá sólo se sube lo que VIVE en memory/. El `path_prefix` del endpoint acota
+            # el DESTINO, no el origen — este filtro es el que cuida el origen.
         if not md.is_file():
-            continue  # symlink roto / un directorio que case el glob
+            continue  # un directorio que case el glob
         rel_within = md.relative_to(project.memory_dir).as_posix()
         rel_path = f"{project.slug}/{rel_within}"
         docs.append((rel_path, md.read_text(encoding="utf-8")))

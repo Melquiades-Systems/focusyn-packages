@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -22,6 +23,10 @@ from typing import Any
 # Eventos que disparan el sync (mismos que el diseño 9.7). SessionEnd al cerrar; PreCompact antes de
 # compactar. Ambos async: no retrasan la salida ni bloquean la compactación.
 DEFAULT_EVENTS: tuple[str, ...] = ("SessionEnd", "PreCompact")
+# Lista blanca: `--events` es input del usuario y termina DENTRO de un comando de shell escrito en
+# settings.json. Aceptar cualquier string dejaba escribir un comando arbitrario que corre solo al
+# cerrar cada sesión. Sólo eventos de Claude Code que tengan sentido para un sync de memorias.
+VALID_EVENTS: frozenset[str] = frozenset({"SessionEnd", "PreCompact", "SessionStart", "Stop"})
 _TIMEOUTS = {"SessionEnd": 60, "PreCompact": 120}
 _STATUS = "Focusyn: sincronizando memorias al corpus…"
 # Substring que identifica NUESTROS handlers (Claude Code no tiene campo de autoría). Caza tanto el
@@ -70,9 +75,19 @@ def resolve_binary() -> str:
 
 
 def build_command(binary: str, event: str) -> str:
-    """El comando del hook: fecha + `focusyn memory sync --quiet` + log. SIN la key adentro."""
+    """El comando del hook: fecha + `focusyn memory sync --quiet` + log. SIN la key adentro.
+
+    Todo lo interpolado va por ``shlex.quote``: esto se escribe en ``settings.json`` y Claude Code
+    lo ejecuta **en un shell**. Sin quoting, un ``event`` con una comilla (viene de ``--events``)
+    cerraba el literal y dejaba escrito un comando arbitrario que corre solo en cada SessionEnd; y
+    un ``$HOME`` con espacios rompía el hook en silencio (es ``async`` y loguea a un archivo).
+    ``event`` además se valida contra la lista blanca de eventos en :func:`install`.
+    """
     log = _log_path()
-    return f"{{ date '+[{event} %F %T]'; {binary} memory sync --quiet; }} >> {log} 2>&1"
+    return (
+        f"{{ date '+[{event} %F %T]'; {shlex.quote(binary)} memory sync --quiet; }} "
+        f">> {shlex.quote(str(log))} 2>&1"
+    )
 
 
 def _load_settings(path: Path) -> dict[str, Any]:
@@ -136,7 +151,17 @@ def _write_atomic(path: Path, data: dict[str, Any]) -> Path | None:
 
 
 def install(events: tuple[str, ...] = DEFAULT_EVENTS, *, dry_run: bool = False) -> InstallResult:
-    """Instala (o reemplaza) nuestros hooks. Idempotente: migra el legacy con key inline."""
+    """Instala (o reemplaza) nuestros hooks. Idempotente: migra el legacy con key inline.
+
+    ``events`` se valida contra :data:`VALID_EVENTS`: lo que entra acá termina escrito en un comando
+    de shell dentro de ``settings.json``, así que sólo se aceptan nombres de evento conocidos.
+    """
+    unknown = [e for e in events if e not in VALID_EVENTS]
+    if unknown:
+        raise ValueError(
+            f"Evento(s) desconocido(s): {', '.join(unknown)}. "
+            f"Válidos: {', '.join(sorted(VALID_EVENTS))}."
+        )
     binary = resolve_binary()
     path = settings_path()
     settings = _load_settings(path)
@@ -224,6 +249,7 @@ def uninstall(*, dry_run: bool = False) -> InstallResult:
 
 __all__ = [
     "DEFAULT_EVENTS",
+    "VALID_EVENTS",
     "InstallResult",
     "settings_path",
     "resolve_binary",
