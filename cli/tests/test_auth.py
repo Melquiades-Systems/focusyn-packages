@@ -28,19 +28,19 @@ def test_login_ok(monkeypatch: pytest.MonkeyPatch) -> None:
         request=httpx.Request("POST", "http://gw/auth/login"),
     )
     seen = _fake_post(monkeypatch, resp)
-    tokens = auth.login("http://gw", "tester", "pw")
+    tokens = auth.login("http://gw", "alice", "pw")
     assert tokens.access_token == "acc"
     assert tokens.refresh_token == "ref"
     assert tokens.expires_in == 1800
     assert seen["url"] == "http://gw/auth/login"
-    assert seen["json"] == {"username": "tester", "password": "pw"}
+    assert seen["json"] == {"username": "alice", "password": "pw"}
 
 
 def test_login_credenciales_malas(monkeypatch: pytest.MonkeyPatch) -> None:
     resp = httpx.Response(401, json={}, request=httpx.Request("POST", "http://gw/auth/login"))
     _fake_post(monkeypatch, resp)
     with pytest.raises(CliError, match="[Cc]redenciales"):
-        auth.login("http://gw", "tester", "bad")
+        auth.login("http://gw", "alice", "bad")
 
 
 def test_refresh_rota(monkeypatch: pytest.MonkeyPatch) -> None:

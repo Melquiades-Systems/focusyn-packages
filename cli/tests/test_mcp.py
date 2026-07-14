@@ -82,7 +82,7 @@ def _routes(
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
         if path == "/v1/auth/whoami":
-            return httpx.Response(200, json={"principal": "user:tester", "scopes": scopes})
+            return httpx.Response(200, json={"principal": "user:alice", "scopes": scopes})
         if path == "/v1/agents" and request.method == "GET":
             return httpx.Response(200, json={"agents": agents or []})
         if path == "/v1/agents" and request.method == "POST":
