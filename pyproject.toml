@@ -1,0 +1,11 @@
+# Raíz VIRTUAL del workspace uv (sin `[project]`: este repo no se publica como paquete — se publican
+# sus miembros). Un solo `.venv` en la raíz y un solo `uv.lock` para todo lo que se instala en la
+# máquina del cliente.
+#
+# Por qué el lock vive acá y no en el repo del gateway: hasta el 2026-07-14 `focusyn-cli` era miembro
+# del workspace de focusyn y su lock lo pinneaba (typer 0.25). Un usuario que instalaba el CLI de
+# verdad (`uv tool install`, sin lock) recibía typer 0.26 — otro dialecto de click — y `focusyn help
+# <cmd>` se le rompía sin que ningún test lo viera. Los artefactos de cliente resuelven ahora sus
+# deps como las resuelve QUIEN LOS INSTALA.
+[tool.uv.workspace]
+members = ["cli"]

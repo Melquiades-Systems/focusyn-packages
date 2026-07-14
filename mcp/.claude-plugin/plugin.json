@@ -1,0 +1,23 @@
+{
+  "name": "focusyn",
+  "displayName": "Focusyn",
+  "version": "0.1.0",
+  "description": "MCP del gateway focusyn: lectura y escritura gobernada de los vaults del ecosistema (GraphRAG, ADRs, código), más el auto-sync de las memorias de Claude Code.",
+  "author": {
+    "name": "Melquiades Systems",
+    "url": "https://github.com/Melquiades-Systems"
+  },
+  "homepage": "https://focusyn.melquiades.systems",
+  "repository": "https://github.com/Melquiades-Systems/focusyn-packages",
+  "keywords": ["mcp", "vault", "graphrag", "knowledge", "memory"],
+  "mcpServers": {
+    "focusyn": {
+      "type": "http",
+      "url": "${FOCUSYN_GATEWAY_URL:-https://focusyn.melquiades.systems}/mcp/",
+      "headers": {
+        "X-Agent-Key": "${FOCUSYN_MCP_KEY}"
+      }
+    }
+  },
+  "hooks": "./hooks/hooks.json"
+}

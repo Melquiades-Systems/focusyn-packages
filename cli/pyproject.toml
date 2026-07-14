@@ -1,0 +1,79 @@
+[project]
+name = "focusyn-cli"
+version = "0.1.0"
+description = "CLI cliente de focusyn: memory sync, attachment upload, deadcode y onboarding. Habla HTTP con el gateway; el gateway autoriza por scopes."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [{ name = "mrgenkko", email = "mrgenkko@gmail.com" }]
+
+# Deps DELGADAS a propósito: httpx (transporte), typer (CLI), pydantic (validar las respuestas del
+# gateway con los modelos de contracts.py), tomli-w (ESCRIBIR el config; leerlo es `tomllib`, stdlib
+# desde 3.11). NINGUNA dep del gateway (fastapi/sqlalchemy/pgvector/pygit2/grpc/…): eso lo garantiza
+# el guard `make cli-check`. deadcode.py no importa ni httpx — es stdlib pura.
+#
+# `click` NO se declara (y no se importa): typer >=0.26 lo VENDORIZA (`typer._click`), así que un
+# `import click` propio trae un dialecto DISTINTO al del árbol de comandos — con eso `focusyn help
+# <cmd>` se rompía en toda instalación fresca. `focusyn help` navega por protocolo (get_command /
+# list_commands / context_class), sin nombrar a click.
+dependencies = [
+    "httpx>=0.27",
+    "typer>=0.12",
+    "pydantic>=2.7",
+    "tomli-w>=1.0",
+]
+
+[project.scripts]
+# El binario que teclea el usuario. El de operador (Postgres directo) es `focusynctl`, en el repo
+# del gateway (paquete `focusyn`) — no colisionan porque son paquetes (y ahora repos) distintos.
+focusyn = "focusyn_cli.cli:app"
+
+# Tooling PROPIO: hasta el 2026-07-14 este paquete era miembro del workspace uv del gateway y
+# heredaba su ruff/mypy/pytest. Al mudarse a focusyn-packages dejó de tener ese padre → el dev-group
+# y la config de abajo son lo que antes ponía el `pyproject.toml` del gateway.
+[dependency-groups]
+dev = [
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "pytest>=8.3",
+    "vulture>=2.14",   # el detector nativo de Python que invoca `focusyn deadcode` (subprocess)
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/focusyn_cli"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM", "ASYNC"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["focusyn_cli"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+plugins = ["pydantic.mypy"]
+mypy_path = "src"
+explicit_package_bases = true
+namespace_packages = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+# `focusyn deadcode` sobre este mismo paquete (`make deadcode`). El CLI es 100% síncrono y no tiene
+# framework que invoque puntos de entrada por reflexión, salvo Typer: sin `ignore_decorators`, los
+# comandos `@app.command` se reportarían como muertos (nadie los llama desde el repo — los llama el
+# usuario tecleando).
+[tool.vulture]
+paths = ["src/focusyn_cli"]
+min_confidence = 60
+ignore_decorators = ["@*app.command", "@*app.callback"]

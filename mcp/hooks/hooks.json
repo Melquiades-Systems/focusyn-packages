@@ -1,0 +1,29 @@
+{
+  "description": "Auto-captura de memorias de Claude Code → corpus `claude-memory` del gateway (focusyn memory sync).",
+  "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/memory-sync.sh SessionEnd",
+            "timeout": 60,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/memory-sync.sh PreCompact",
+            "timeout": 120,
+            "async": true
+          }
+        ]
+      }
+    ]
+  }
+}

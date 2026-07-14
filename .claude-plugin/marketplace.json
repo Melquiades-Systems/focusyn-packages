@@ -1,0 +1,18 @@
+{
+  "name": "melquiades",
+  "description": "Marketplace de plugins de Claude Code de Melquiades Systems.",
+  "owner": {
+    "name": "Melquiades Systems",
+    "url": "https://github.com/Melquiades-Systems"
+  },
+  "plugins": [
+    {
+      "name": "focusyn",
+      "source": "./mcp",
+      "description": "MCP del gateway focusyn (vaults del ecosistema: notas, ADRs, código) + auto-sync de las memorias de Claude Code.",
+      "version": "0.1.0",
+      "category": "knowledge",
+      "keywords": ["mcp", "vault", "graphrag", "memory"]
+    }
+  ]
+}

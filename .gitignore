@@ -1,0 +1,28 @@
+# entornos
+.venv/
+venv/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# caches de tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# credenciales / entorno local — NUNCA versionar: la API key del MCP (FOCUSYN_MCP_KEY) y la del
+# ingest viven en el entorno o en ~/.config/focusyn/config.toml (0600), jamás en el repo.
+.env
+.env.*
+!.env.example
+
+# editores / SO
+.idea/
+.vscode/
+.DS_Store
