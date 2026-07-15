@@ -160,7 +160,9 @@ def init(
     api_key: Annotated[
         str | None,
         typer.Option(
-            "--api-key", help="Key no-interactiva (scripting/CI); si falta se pide con getpass."
+            "--api-key",
+            help="Key no-interactiva (scripting/CI). Inline queda en el historial del shell; "
+            "sin el flag se pide oculta.",
         ),
     ] = None,
     profile: Annotated[
@@ -548,7 +550,11 @@ def mcp_install(
     ] = False,
     use_key: Annotated[
         str | None,
-        typer.Option("--use-key", help="Registra con una key YA emitida (no emite ninguna)."),
+        typer.Option(
+            "--use-key",
+            help="Registra con una key YA emitida (no emite ninguna). Inline queda en el "
+            "historial del shell: usá `--use-key -` para pegarla oculta.",
+        ),
     ] = None,
     server_name: Annotated[
         str, typer.Option("--server-name", help="Nombre del server en Claude Code.")
@@ -575,6 +581,11 @@ def mcp_install(
     agent_name = name or mcp_mod.default_agent_name()
 
     try:
+        if use_key == "-":
+            # Pegarla oculta: la key inline queda en el historial del shell; así, no.
+            use_key = getpass.getpass("API key a registrar (oculta): ").strip()
+            if not use_key:
+                raise CliError("No ingresaste ninguna key.", code=2)
         cred = session.credential_for(
             profile, gateway_url, api_key, need_secret=use_key is None
         )

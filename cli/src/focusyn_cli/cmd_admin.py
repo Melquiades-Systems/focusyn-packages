@@ -179,7 +179,15 @@ def credential_list(
 def credential_create(
     label: Annotated[str, typer.Option("--label")],
     kind: Annotated[str, typer.Option("--kind", help="llm_api_key | git_pat …")],
-    secret: Annotated[str, typer.Option("--secret", prompt=True, hide_input=True)],
+    secret: Annotated[
+        str,
+        typer.Option(
+            "--secret",
+            prompt=True,
+            hide_input=True,
+            help="Sin el flag se pide OCULTO (recomendado): inline queda en el historial.",
+        ),
+    ],
     provider: Annotated[str | None, typer.Option("--provider")] = None,
     scope: Annotated[str | None, typer.Option("--scope", help="company (admin) | user")] = None,
     profile: _Profile = None,
@@ -199,7 +207,15 @@ def credential_create(
 @credential_app.command("rotate")
 def credential_rotate(
     credential_id: Annotated[str, typer.Argument()],
-    secret: Annotated[str, typer.Option("--secret", prompt=True, hide_input=True)],
+    secret: Annotated[
+        str,
+        typer.Option(
+            "--secret",
+            prompt=True,
+            hide_input=True,
+            help="Sin el flag se pide OCULTO (recomendado): inline queda en el historial.",
+        ),
+    ],
     profile: _Profile = None,
     gateway_url: _Url = None,
     api_key: _Key = None,

@@ -99,7 +99,9 @@ def test_mcp_add_no_registra_http(monkeypatch: pytest.MonkeyPatch) -> None:
     # Un endpoint http registrado en Claude Code mandaría la key en claro en CADA sesión.
     calls: list[list[str]] = []
 
-    def _run(args: list[str]) -> subprocess.CompletedProcess[str]:
+    def _run(
+        args: list[str], env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
         calls.append(args)
         return subprocess.CompletedProcess(args, 0, "", "")
 

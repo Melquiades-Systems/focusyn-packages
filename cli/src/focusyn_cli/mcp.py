@@ -7,6 +7,16 @@ construye el comando, se corre y se traduce el resultado.
 La key del MCP es una **API key de máquina** (una por máquina, no la personal del humano): la emite
 ``POST /v1/agents`` con no-escalada de scopes. Este módulo no la persiste en ningún lado nuestro —
 vive en la config de Claude Code, que es quien la manda en el header ``X-Agent-Key``.
+
+**Riesgo residual documentado (V4 de la auditoría, verificado contra claude 2.1.207):** la key
+viaja UNA vez por el argv del subproceso ``claude mcp add`` y durante esa corrida es visible en
+``/proc/<pid>/cmdline`` para cualquier usuario local. No hay alternativa hoy: el CLI de Claude
+Code no acepta headers por stdin ni por archivo, ``add-json`` también recibe el JSON por argv, y
+registrar el placeholder ``${VAR}`` literal (que ``add`` NO expande: se verificó que lo guarda
+tal cual) dejaría un MCP que sólo funciona si la sesión —incluida la GUI— trae esa variable:
+roto por diseño. Se acepta la ventana breve del argv; lo que NO se acepta es el secreto en
+lugares persistentes: nada de keys en el historial del shell (flags inline desalentados, prompts
+ocultos como default) ni en la salida del CLI (sólo el prefijo, con test).
 """
 
 from __future__ import annotations
@@ -101,7 +111,13 @@ def build_add_command(
     *,
     claude_scope: str = DEFAULT_CLAUDE_SCOPE,
 ) -> list[str]:
-    """El ``claude mcp add`` exacto que se va a correr."""
+    """El ``claude mcp add`` exacto que se va a correr.
+
+    Este argv es el ÚNICO lugar por el que la key transita en claro (ver el riesgo residual
+    en el docstring del módulo): breve, del subproceso, y sin alternativa en el CLI de Claude
+    Code de hoy. Si algún día ``claude mcp add`` acepta el header por stdin/archivo, el cambio
+    va acá.
+    """
     return [
         binary,
         "mcp",

@@ -32,6 +32,16 @@ focusyn:
     X-Agent-Key: a2a_supersecretkey123
 """
 
+_GET_OUTPUT_TPL = """\
+{name}:
+  Scope: User config (available in all your projects)
+  Status: ✔ Connected
+  Type: http
+  URL: {url}
+  Headers:
+    X-Agent-Key: {key}
+"""
+
 
 @pytest.fixture()
 def gateway(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
@@ -52,16 +62,35 @@ def gateway(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     return state
 
 
+class _ClaudeCalls(list[list[str]]):
+    """Las invocaciones al CLI `claude`, más el estado del registro fake."""
+
+    servers: dict[str, dict[str, str]]
+
+
 @pytest.fixture()
-def claude(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
-    """Registra las invocaciones al CLI `claude` y devuelve éxito. Nunca corre el binario real."""
-    calls: list[list[str]] = []
+def claude(monkeypatch: pytest.MonkeyPatch) -> _ClaudeCalls:
+    """Fake STATEFUL del CLI `claude` (add/get/remove sobre un dict; nunca el binario real)."""
+    calls = _ClaudeCalls()
+    calls.servers = {}
 
     def _run(args: list[str]) -> subprocess.CompletedProcess[str]:
         calls.append(args)
-        if args[2] == "get":  # `claude mcp get` → nada registrado, salvo que el test lo cambie
-            return subprocess.CompletedProcess(args, 1, "", "no server")
-        return subprocess.CompletedProcess(args, 0, "added", "")
+        verb = args[2]
+        if verb == "add":
+            name, url, header = args[7], args[8], args[10]
+            calls.servers[name] = {"url": url, "key": header.split(": ", 1)[1]}
+            return subprocess.CompletedProcess(args, 0, "added", "")
+        if verb == "get":
+            reg = calls.servers.get(args[3])
+            if reg is None:
+                return subprocess.CompletedProcess(args, 1, "", "no server")
+            out = _GET_OUTPUT_TPL.format(name=args[3], url=reg["url"], key=reg["key"])
+            return subprocess.CompletedProcess(args, 0, out, "")
+        if verb == "remove":
+            existed = calls.servers.pop(args[3], None) is not None
+            return subprocess.CompletedProcess(args, 0 if existed else 1, "", "")
+        return subprocess.CompletedProcess(args, 1, "", f"verbo desconocido: {verb}")
 
     monkeypatch.setattr(mcp_mod, "claude_binary", lambda: "/usr/bin/claude")
     monkeypatch.setattr(mcp_mod, "_run", _run)
@@ -112,7 +141,7 @@ def test_get_parsea_url_y_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         mcp_mod,
         "_run",
-        lambda args: subprocess.CompletedProcess(args, 0, _GET_OUTPUT, ""),
+        lambda args, env=None: subprocess.CompletedProcess(args, 0, _GET_OUTPUT, ""),
     )
     reg = mcp_mod.get("focusyn")
     assert reg is not None
@@ -122,22 +151,14 @@ def test_get_parsea_url_y_key(monkeypatch: pytest.MonkeyPatch) -> None:
     assert reg.key_prefix() == "a2a_supersec…"  # nunca la key entera
 
 
-def test_add_reemplaza_el_registro_previo(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[list[str]] = []
-
-    def _run(args: list[str]) -> subprocess.CompletedProcess[str]:
-        calls.append(args)
-        if args[2] == "get":
-            return subprocess.CompletedProcess(args, 0, _GET_OUTPUT, "")
-        return subprocess.CompletedProcess(args, 0, "", "")
-
-    monkeypatch.setattr(mcp_mod, "claude_binary", lambda: "/usr/bin/claude")
-    monkeypatch.setattr(mcp_mod, "_run", _run)
+def test_add_reemplaza_el_registro_previo(claude: _ClaudeCalls) -> None:
+    claude.servers["focusyn"] = {"url": "https://gw/mcp/", "key": "a2a_vieja"}
 
     url = mcp_mod.add("focusyn", "https://gw", "a2a_k")
     assert url == "https://gw/mcp/"
-    verbs = [c[2] for c in calls]
+    verbs = [c[2] for c in claude]
     assert verbs == ["get", "remove", "add"]  # remove ANTES del add (add falla si el nombre existe)
+    assert claude.servers["focusyn"]["key"] == "a2a_k"
 
 
 def test_add_propaga_el_fallo_del_cli_de_claude(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -145,12 +166,19 @@ def test_add_propaga_el_fallo_del_cli_de_claude(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(
         mcp_mod,
         "_run",
-        lambda args: subprocess.CompletedProcess(args, 1, "", "boom")
+        lambda args, env=None: subprocess.CompletedProcess(args, 1, "", "boom")
         if args[2] == "add"
         else subprocess.CompletedProcess(args, 1, "", ""),
     )
     with pytest.raises(CliError, match="boom"):
         mcp_mod.add("focusyn", "https://gw", "a2a_k")
+
+
+# --------------------------------------------------------------------------- higiene de la key
+# El riesgo residual (V4 de la auditoría) está DOCUMENTADO en mcp.py: la key transita una vez por
+# el argv del `claude mcp add` (sin alternativa en el CLI de Claude Code de hoy, verificado contra
+# 2.1.207: guarda `${VAR}` literal, sin stdin/archivo para headers). Lo que sí es exigible por
+# test: la key jamás en la SALIDA del propio CLI, y un camino sin historial para pegarla a mano.
 
 
 def test_claude_binary_ausente_es_error_accionable(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -163,15 +191,18 @@ def test_claude_binary_ausente_es_error_accionable(monkeypatch: pytest.MonkeyPat
 
 
 def test_install_emite_la_key_y_registra(
-    gateway: dict[str, Any], claude: list[list[str]]
+    gateway: dict[str, Any], claude: _ClaudeCalls
 ) -> None:
     _gw(gateway, _routes(scopes=["read", "propose", "apply", "sync"]))
     result = runner.invoke(app, ["mcp", "install", "--name", "mcp-host"])
     assert result.exit_code == 0, result.stdout
     assert "key emitida" in result.stdout
     add = next(c for c in claude if c[2] == "add")
-    assert "X-Agent-Key: a2a_nueva" in add
     assert "https://gw/mcp/" in add
+    assert claude.servers["focusyn"]["key"] == "a2a_nueva"
+    # La key registrada JAMÁS aparece en la salida del CLI (sí transita el argv del
+    # subproceso `claude mcp add`: riesgo residual documentado en mcp.py).
+    assert "a2a_nueva" not in result.stdout
 
 
 def test_install_recorta_los_scopes_que_no_tenes(
@@ -209,7 +240,7 @@ def test_install_con_agente_existente_exige_rotate(
     assert not [c for c in claude if c[2] == "add"]
 
 
-def test_install_rotate_reusa_el_agente(gateway: dict[str, Any], claude: list[list[str]]) -> None:
+def test_install_rotate_reusa_el_agente(gateway: dict[str, Any], claude: _ClaudeCalls) -> None:
     _gw(
         gateway,
         _routes(scopes=["read"], agents=[{"agent_id": "mcp-host", "scopes": ["read"]}]),
@@ -217,18 +248,28 @@ def test_install_rotate_reusa_el_agente(gateway: dict[str, Any], claude: list[li
     result = runner.invoke(app, ["mcp", "install", "--name", "mcp-host", "--rotate"])
     assert result.exit_code == 0, result.stdout
     assert "key rotada" in result.stdout
-    add = next(c for c in claude if c[2] == "add")
-    assert "X-Agent-Key: a2a_rotada" in add
+    assert claude.servers["focusyn"]["key"] == "a2a_rotada"
 
 
-def test_install_use_key_no_emite_nada(gateway: dict[str, Any], claude: list[list[str]]) -> None:
+def test_install_use_key_no_emite_nada(gateway: dict[str, Any], claude: _ClaudeCalls) -> None:
     # El gateway sin Fase 3 desplegada (404 en /v1/agents) igual debe poder registrar el MCP.
     _gw(gateway, lambda r: httpx.Response(404, json={"error": "not found"}))
     result = runner.invoke(app, ["mcp", "install", "--use-key", "a2a_manual"])
     assert result.exit_code == 0, result.stdout
-    add = next(c for c in claude if c[2] == "add")
-    assert "X-Agent-Key: a2a_manual" in add
+    assert claude.servers["focusyn"]["key"] == "a2a_manual"
     assert not gateway["requests"]  # ni una llamada: la key ya la trajo el usuario
+
+
+def test_install_use_key_guion_la_pide_oculta(
+    gateway: dict[str, Any], claude: _ClaudeCalls, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `--use-key -` = pegarla oculta: no queda en el historial del shell (inline sí).
+    monkeypatch.setattr("focusyn_cli.cli.getpass.getpass", lambda _prompt="": " a2a_pegada ")
+    result = runner.invoke(app, ["mcp", "install", "--use-key", "-"])
+    assert result.exit_code == 0, result.stdout
+    assert claude.servers["focusyn"]["key"] == "a2a_pegada"  # con .strip()
+    assert "a2a_pegada" not in result.stdout
+    assert not gateway["requests"]
 
 
 def test_install_contra_gateway_sin_whoami_sugiere_use_key(
@@ -302,11 +343,13 @@ def test_status_sin_registro(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "no registrado" in result.stdout
 
 
-def test_uninstall_desregistra(claude: list[list[str]]) -> None:
+def test_uninstall_desregistra(claude: _ClaudeCalls) -> None:
+    claude.servers["focusyn"] = {"url": "https://gw/mcp/", "key": "a2a_k"}
     result = runner.invoke(app, ["mcp", "uninstall"])
     assert result.exit_code == 0, result.stdout
     assert claude[0][2] == "remove"
     assert "desregistrado" in result.stdout
+    assert "focusyn" not in claude.servers
 
 
 # --------------------------------------------------------------------------- help
