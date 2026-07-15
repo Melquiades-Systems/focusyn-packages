@@ -113,6 +113,19 @@ def _fail(exc: CliError) -> None:
     raise typer.Exit(code=exc.code)
 
 
+def _caps_detail(caps: dict[str, Any]) -> str:
+    """``api X[, N vaults]`` — el conteo sólo si el gateway lo dio.
+
+    La vista ANÓNIMA de ``/v1/capabilities`` ya no enumera vaults (sus nombres son datos de
+    clientes): sin credencial la lista viene vacía, y "0 vaults" mentiría.
+    """
+    detail = f"api {caps.get('api_version', '?')}"
+    vaults = caps.get("vaults") or []
+    if vaults:
+        detail += f", {len(vaults)} vaults"
+    return detail
+
+
 # --------------------------------------------------------------------------- #
 # init — configura credencial + perfil
 # --------------------------------------------------------------------------- #
@@ -172,11 +185,7 @@ def init(
         # Validar la URL contra /v1/capabilities (público) ANTES de pedir credencial: distingue
         # "URL mal escrita" de "credencial mala".
         caps = check_url(Credential(gateway_url=url))
-        typer.secho(
-            f"✓ gateway {url} (api {caps.get('api_version', '?')}, "
-            f"{len(caps.get('vaults', []))} vaults)",
-            fg=typer.colors.GREEN,
-        )
+        typer.secho(f"✓ gateway {url} ({_caps_detail(caps)})", fg=typer.colors.GREEN)
 
         if not invite and not no_key and key is None:
             key = (
@@ -295,14 +304,10 @@ def doctor(
         typer.secho("✗ sin gateway configurado → corré `focusyn init`", fg=typer.colors.RED)
         raise typer.Exit(code=1)
 
-    # 1. URL (público)
+    # 1. URL (público; con credencial el gateway enriquece la respuesta con los vaults)
     try:
         caps = check_url(cred)
-        typer.secho(
-            f"✓ gateway {cred.gateway_url} (api {caps.get('api_version', '?')}, "
-            f"{len(caps.get('vaults', []))} vaults)",
-            fg=typer.colors.GREEN,
-        )
+        typer.secho(f"✓ gateway {cred.gateway_url} ({_caps_detail(caps)})", fg=typer.colors.GREEN)
     except CliError as exc:
         typer.secho(f"✗ gateway: {exc.message}", fg=typer.colors.RED)
         raise typer.Exit(code=1) from exc

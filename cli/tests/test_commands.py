@@ -212,6 +212,27 @@ def test_agent_list_no_admin(gateway: dict[str, object]) -> None:
     assert "mi-laptop" in result.output
 
 
+def test_init_anonimo_no_muestra_conteo_de_vaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    # La vista anónima de /v1/capabilities ya no enumera vaults → "0 vaults" mentiría; se omite.
+    monkeypatch.setattr(
+        "focusyn_cli.cli.check_url", lambda cred, **kw: {"api_version": "1.2.3", "vaults": []}
+    )
+    result = runner.invoke(app, ["init", "--gateway-url", "https://gw", "--no-key"])
+    assert result.exit_code == 0, result.output
+    assert "api 1.2.3" in result.output
+    assert "vaults" not in result.output
+
+
+def test_init_con_vaults_muestra_conteo(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "focusyn_cli.cli.check_url",
+        lambda cred, **kw: {"api_version": "1.2.3", "vaults": ["a", "b"]},
+    )
+    result = runner.invoke(app, ["init", "--gateway-url", "https://gw", "--no-key"])
+    assert result.exit_code == 0, result.output
+    assert "2 vaults" in result.output
+
+
 def test_agent_rotate(gateway: dict[str, object]) -> None:
     _set(gateway, lambda r: httpx.Response(200, json={"agent_id": "l", "api_key": "a2a_ROT"}))
     result = runner.invoke(app, ["agent", "rotate", "l"])
