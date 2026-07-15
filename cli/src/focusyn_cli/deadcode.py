@@ -68,6 +68,10 @@ _SKIP_DIRS = frozenset(
     }
 )
 
+# La versión de knip que corre el fallback de npx (cuando el repo NO lo trae instalado).
+# Mismo racional que _GO_DEADCODE: pin explícito, subirlo es un commit.
+_KNIP_PINNED = "knip@6.26.0"
+
 # Dónde busca knip su config. Sin ella corre igual (infiere los entrypoints de los plugins de
 # Vite/Next/etc.), pero es el mismo trato que vulture: sin calibrar, el reporte trae ruido.
 _KNIP_CONFIG_FILES = (
@@ -297,7 +301,12 @@ def run_python(root: Path) -> list[Finding]:
 
 # El paquete `deadcode` de golang.org/x/tools, resuelto por el propio toolchain del repo. `go run`
 # lo compila una vez y lo cachea; la primera corrida en una máquina nueva necesita red.
-_GO_DEADCODE = "golang.org/x/tools/cmd/deadcode@latest"
+#
+# PINEADO a una versión concreta, nunca `@latest`: `go run` ejecuta lo que el upstream publique
+# HOY — un compromiso de x/tools se convertiría en RCE en la máquina del dev en la próxima
+# corrida, sin que nadie tocara nada acá. Con el pin, cambiar qué código se ejecuta exige un
+# commit en este repo (y ojos encima). Subir la versión: editar esta constante.
+_GO_DEADCODE = "golang.org/x/tools/cmd/deadcode@v0.48.0"
 
 
 def parse_go_report(stdout: str, root: Path) -> list[Finding]:
@@ -426,10 +435,13 @@ def run_ts(root: Path) -> list[Finding]:
         )
     local = root / "node_modules" / ".bin" / "knip"
     if local.exists():
+        # El del repo manda: lo pinea SU lockfile (y sus devDependencies), no nosotros.
         args = [str(local)]
     elif shutil.which("npx") is not None:
-        # El repo no lo trae en devDependencies: npx lo baja (y lo cachea). Es el modo del diseño.
-        args = ["npx", "--yes", "knip"]
+        # El repo no lo trae en devDependencies: npx lo baja (y lo cachea). PINEADO, nunca a
+        # secas: `npx --yes` baja y EJECUTA sin confirmación lo que el registro resuelva — sin
+        # versión sería "lo último que alguien publicó", y un compromiso upstream es RCE acá.
+        args = ["npx", "--yes", _KNIP_PINNED]
     else:
         raise ToolchainMissing("no encuentro `knip` ni `npx` (¿está Node instalado?)")
     proc = subprocess.run(  # noqa: S603 - argv fijo, sin shell

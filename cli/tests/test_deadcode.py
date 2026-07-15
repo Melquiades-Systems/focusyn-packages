@@ -578,3 +578,79 @@ def test_to_json_distingue_revisado_y_limpio_de_no_revisado(tmp_path: Path) -> N
     assert por_nombre["sin-revisar"]["skipped"] == ["ts (frontend)"]
 
     assert por_nombre["sucio"]["findings"][0]["symbol"] == "foo"
+
+
+# ------------------------------------------------------------------------------- pins (V3)
+# `go run …@latest` y `npx --yes knip` sin versión ejecutan lo que el upstream publique HOY:
+# un compromiso (o typosquat) sería RCE en la máquina del dev. Los backends remotos van PINEADOS.
+
+
+def _pin_re() -> str:
+    return r"@v?\d+\.\d+\.\d+$"
+
+
+def test_go_deadcode_corre_pineado(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import re
+
+    llamadas: list[list[str]] = []
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        llamadas.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="null", stderr="")
+
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/go")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    deadcode.run_go(tmp_path)
+
+    (args,) = llamadas
+    assert args[:2] == ["go", "run"]
+    modulo = args[2]
+    assert modulo.startswith("golang.org/x/tools/cmd/deadcode@")
+    assert "@latest" not in modulo
+    assert re.search(_pin_re(), modulo), modulo  # versión concreta, p. ej. @v0.48.0
+
+
+def test_npx_knip_corre_pineado(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import re
+
+    (tmp_path / "node_modules").mkdir()  # knip exige deps instaladas; sin binario local
+    llamadas: list[list[str]] = []
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        llamadas.append(args)
+        return subprocess.CompletedProcess(args, 1, stdout='{"issues": []}', stderr="")
+
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/npx")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    deadcode.run_ts(tmp_path)
+
+    (args,) = llamadas
+    assert args[:2] == ["npx", "--yes"]
+    paquete = args[2]
+    assert paquete.startswith("knip@")
+    assert "@latest" not in paquete
+    assert re.search(_pin_re(), paquete), paquete  # versión concreta, p. ej. knip@6.26.0
+
+
+def test_knip_local_del_repo_sigue_teniendo_prioridad(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Si el repo trae knip en devDependencies, manda el SUYO (lo pinea su lockfile, no nosotros).
+    bin_dir = tmp_path / "node_modules" / ".bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "knip").write_text("#!/bin/sh\n")
+    llamadas: list[list[str]] = []
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        llamadas.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout='{"issues": []}', stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    deadcode.run_ts(tmp_path)
+
+    (args,) = llamadas
+    assert args[0] == str(bin_dir / "knip")
+    assert not any(a.startswith("npx") for a in args)
