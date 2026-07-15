@@ -47,7 +47,7 @@ def _ok_response() -> dict[str, object]:
 def _client(
     handler: Callable[[httpx.Request], httpx.Response], *, key: str = "a2a_k"
 ) -> AttachmentUploadClient:
-    return AttachmentUploadClient("http://gw:7415", key, transport=httpx.MockTransport(handler))
+    return AttachmentUploadClient("https://gw:7415", key, transport=httpx.MockTransport(handler))
 
 
 # --------------------------------------------------------------------------- #
@@ -179,7 +179,7 @@ def test_upload_eleva_en_error_http(tmp_path: Path) -> None:
 
 
 def test_cli_sin_api_key_falla(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("FOCUSYN_GATEWAY_URL", "http://gw:7415")  # gateway sí, key no
+    monkeypatch.setenv("FOCUSYN_GATEWAY_URL", "https://gw:7415")  # gateway sí, key no
     f = tmp_path / "shot.png"
     f.write_bytes(b"x")
     result = runner.invoke(app, ["attachment", "upload", "--file", str(f), "--vault", "acme"])
@@ -237,7 +237,7 @@ def test_cli_upload_invoca_cliente_y_muestra_markdown_ref(
             "--doc-id",
             "ACME-PEND-013",
             "--gateway-url",
-            "http://gw:7415",
+            "https://gw:7415",
             "--api-key",
             "a2a_test",
         ],

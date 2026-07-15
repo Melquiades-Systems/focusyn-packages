@@ -101,7 +101,7 @@ def test_collect_recursivo_con_subdir(tmp_path: Path) -> None:
 def _client(
     handler: Callable[[httpx.Request], httpx.Response], *, key: str = "a2a_k"
 ) -> MemorySyncClient:
-    return MemorySyncClient("http://gw:7415", key, transport=httpx.MockTransport(handler))
+    return MemorySyncClient("https://gw:7415", key, transport=httpx.MockTransport(handler))
 
 
 def test_sync_project_envia_payload_y_parsea(tmp_path: Path) -> None:
@@ -209,7 +209,7 @@ def test_cli_dry_run_sin_red(tmp_path: Path) -> None:
 
 def test_cli_sin_api_key_falla(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Gateway configurado por env, pero SIN key → debe fallar pidiendo una.
-    monkeypatch.setenv("FOCUSYN_GATEWAY_URL", "http://gw:7415")
+    monkeypatch.setenv("FOCUSYN_GATEWAY_URL", "https://gw:7415")
     _make_project(tmp_path, "proj-a", {"MEMORY.md": "a"})
     result = runner.invoke(app, ["memory", "sync", "--projects-root", str(tmp_path)])
     assert result.exit_code != 0
@@ -260,7 +260,7 @@ def test_cli_sync_invoca_cliente_por_proyecto(
             "memory",
             "sync",
             "--gateway-url",
-            "http://gw:7415",
+            "https://gw:7415",
             "--api-key",
             "a2a_test",
             "--projects-root",

@@ -13,19 +13,11 @@ from typing import Any, cast
 import httpx
 
 from focusyn_cli import __version__
-from focusyn_cli.config import Credential
+from focusyn_cli.config import Credential, validate_gateway_url
+from focusyn_cli.errors import CliError
 
 # Timeout generoso: el gateway puede tardar (clasificación LLM, commit+push, embeddings).
 _DEFAULT_TIMEOUT = 120.0
-
-
-class CliError(Exception):
-    """Error de cara al usuario: mensaje limpio + exit code. Lo captura el entrypoint del CLI."""
-
-    def __init__(self, message: str, *, code: int = 1) -> None:
-        super().__init__(message)
-        self.message = message
-        self.code = code
 
 
 def _explain_status(exc: httpx.HTTPStatusError) -> CliError:
@@ -65,6 +57,9 @@ class GatewayClient:
         refresher: Callable[[], str | None] | None = None,
     ) -> None:
         self._cred = credential
+        # Defensa en profundidad: por acá pasa TODO el tráfico autenticado. `resolve()` ya valida,
+        # pero una URL que llegó por otro camino (config a mano, un `claude mcp get`) muere acá.
+        validate_gateway_url(credential.gateway_url)
         # ``refresher`` (login JWT): ante un 401 devuelve un access token fresco (o None). Renueva
         # el Bearer expirado sin que el usuario re-loguee. Con API key es None.
         self._refresher = refresher

@@ -16,12 +16,18 @@ import os
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import tomli_w
+
+from focusyn_cli.errors import CliError
 
 # URL pública del gateway — se OFRECE como default interactivo en `focusyn init`, NO se usa como
 # fallback silencioso: un comando sin gateway configurado debe fallar claro, no adivinar.
 DEFAULT_GATEWAY_URL = "https://focusyn.melquiades.systems"
+# http:// sólo se acepta hacia la propia máquina (gateway de desarrollo local). Hacia cualquier
+# otro host, el header de auth (X-Agent-Key / Bearer) viajaría EN CLARO.
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 _DEFAULT_PROFILE = "default"
 
 # Overrides por entorno. FOCUSYN_API_KEY es el canónico; INGEST/APPLY se aceptan por compat con los
@@ -67,6 +73,34 @@ class Config:
 
     default_profile: str = _DEFAULT_PROFILE
     profiles: dict[str, Credential] = field(default_factory=dict)
+
+
+def validate_gateway_url(url: str, *, source: str = "") -> str:
+    """La URL del gateway si es segura; ``CliError`` si mandaría la credencial en claro.
+
+    ``https`` siempre vale. ``http`` sólo hacia loopback (localhost/127.0.0.1/::1): el único uso
+    legítimo es un gateway de desarrollo en la propia máquina. Cualquier otro esquema —o una URL
+    sin esquema— se rechaza. Esto también protege el camino ``--invite``: la URL de un invite la
+    provee un TERCERO, y sin este check un blob malicioso apuntaría el CLI a un gateway ``http://``
+    del atacante que se queda con la credencial y todo lo que se lea/escriba.
+    """
+    origin = f" (de {source})" if source else ""
+    parsed = urlsplit(url)
+    if parsed.scheme == "https":
+        return url
+    if parsed.scheme == "http":
+        if (parsed.hostname or "") in _LOOPBACK_HOSTS:
+            return url
+        raise CliError(
+            f"URL de gateway insegura{origin}: {url} — con http:// la credencial viaja EN CLARO. "
+            "Usá https:// (http sólo se acepta hacia localhost/127.0.0.1).",
+            code=2,
+        )
+    raise CliError(
+        f"URL de gateway inválida{origin}: '{url}' "
+        f"(esquema {parsed.scheme or 'ausente'!r}). Se espera https://…",
+        code=2,
+    )
 
 
 def config_path() -> Path:
@@ -136,7 +170,8 @@ def resolve(
 
     Devuelve ``None`` si no hay gateway configurado por ningún lado (el comando debe entonces
     pedir ``focusyn init``). Una credencial sin secreto (sólo URL) es válida para los endpoints
-    públicos (``/v1/capabilities``).
+    públicos (``/v1/capabilities``). Eleva ``CliError`` si la URL efectiva no es segura
+    (:func:`validate_gateway_url`) — venga del flag, del entorno o de un config editado a mano.
     """
     config = load_config()
     name = profile or config.default_profile
@@ -148,6 +183,7 @@ def resolve(
     url = gateway_url or env_url or (base.gateway_url if base else None)
     if not url:
         return None
+    url = validate_gateway_url(url)
     key = api_key or env_key or (base.api_key if base else None)
     return Credential(
         gateway_url=url,
@@ -166,4 +202,5 @@ __all__ = [
     "load_config",
     "save_config",
     "resolve",
+    "validate_gateway_url",
 ]

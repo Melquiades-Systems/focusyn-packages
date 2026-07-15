@@ -17,6 +17,7 @@ import socket
 import subprocess
 from dataclasses import dataclass
 
+from focusyn_cli.config import validate_gateway_url
 from focusyn_cli.http import CliError
 
 # El nombre con el que el MCP aparece en Claude Code (`claude mcp list`).
@@ -129,6 +130,9 @@ def add(
     ``claude mcp add`` falla si el nombre ya existe en ese scope → con ``replace`` se quita primero
     (así rotar la key es re-instalar, no editar a mano el header).
     """
+    # Nunca registrar un endpoint http:// en Claude Code: quedaría PERSISTIDO y mandaría la key
+    # en claro en cada sesión, no una vez.
+    validate_gateway_url(gateway_url)
     binary = claude_binary()
     url = mcp_url(gateway_url)
     if replace and get(name) is not None:

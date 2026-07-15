@@ -119,13 +119,18 @@ def _fail(exc: CliError) -> None:
 
 
 def _decode_invite(blob: str) -> tuple[str, str]:
-    """`focusyn-invite:<base64({url,key})>` → (url, key). Eleva CliError si no decodifica."""
+    """`focusyn-invite:<base64({url,key})>` → (url, key). Eleva CliError si no decodifica.
+
+    La URL del blob la provee un TERCERO: se valida acá (https obligatorio) para que un invite
+    malicioso no apunte el CLI a un gateway http:// del atacante.
+    """
     raw = blob[len(_INVITE_PREFIX) :] if blob.startswith(_INVITE_PREFIX) else blob
     try:
         data = json.loads(base64.urlsafe_b64decode(raw.encode()).decode())
-        return str(data["url"]), str(data["key"])
+        url, key = str(data["url"]), str(data["key"])
     except (binascii.Error, ValueError, KeyError, UnicodeDecodeError) as exc:
         raise CliError(f"--invite inválido (no es un blob focusyn-invite): {exc}") from exc
+    return cfg.validate_gateway_url(url, source="--invite"), key
 
 
 @app.command("init")
@@ -281,7 +286,11 @@ def doctor(
 ) -> None:
     """Chequea URL, credencial+scopes, versión, hooks y toolchain de deadcode."""
     ok = True
-    cred = cfg.resolve(profile=profile, gateway_url=gateway_url)
+    try:
+        cred = cfg.resolve(profile=profile, gateway_url=gateway_url)
+    except CliError as exc:
+        _fail(exc)
+        return
     if cred is None:
         typer.secho("✗ sin gateway configurado → corré `focusyn init`", fg=typer.colors.RED)
         raise typer.Exit(code=1)
@@ -368,7 +377,12 @@ def version(
 ) -> None:
     """Versión del cliente (+ del gateway si hay uno configurado)."""
     typer.echo(f"focusyn-cli {__version__}")
-    cred = cfg.resolve(profile=profile)
+    try:
+        cred = cfg.resolve(profile=profile)
+    except CliError as exc:
+        # Una URL insegura configurada no se silencia: se dice, aunque `version` sea informativo.
+        typer.secho(f"⚠ {exc.message}", fg=typer.colors.YELLOW, err=True)
+        return
     if cred is None:
         return
     try:
