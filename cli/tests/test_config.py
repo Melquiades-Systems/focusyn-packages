@@ -93,6 +93,79 @@ def test_resolve_ingest_key_por_compat(tmp_path: Path, monkeypatch: pytest.Monke
     assert cred.api_key == "ingest-key"
 
 
+# --------------------------------------------------------------------------- #
+# ingest_key: la key de MÁQUINA del hook de memory sync (GOTCHA 2)
+# --------------------------------------------------------------------------- #
+
+
+def test_ingest_key_roundtrip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FOCUSYN_CONFIG", str(tmp_path / "cfg.toml"))
+    cfg.save_config(
+        cfg.Config(
+            profiles={"default": Credential(gateway_url="https://gw", access_token="jwt")},
+            ingest_key="a2a_ingest",
+        )
+    )
+    loaded = cfg.load_config()
+    assert loaded.ingest_key == "a2a_ingest"
+    # sigue viviendo FUERA de los perfiles (no pisa el JWT del perfil)
+    assert loaded.profiles["default"].access_token == "jwt"
+    assert loaded.profiles["default"].api_key is None
+
+
+def test_resolve_ingest_usa_config_ingest_key_sobre_jwt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """El caso roto de la F2: perfil con JWT (login) + config.ingest_key → el hook usa la key."""
+    monkeypatch.setenv("FOCUSYN_CONFIG", str(tmp_path / "cfg.toml"))
+    for k in ("FOCUSYN_INGEST_KEY", "FOCUSYN_API_KEY", "FOCUSYN_APPLY_KEY", "FOCUSYN_GATEWAY_URL"):
+        monkeypatch.delenv(k, raising=False)
+    cfg.save_config(
+        cfg.Config(
+            profiles={"default": Credential(gateway_url="https://gw", access_token="jwt")},
+            ingest_key="a2a_ingest",
+        )
+    )
+    # ingest=True: usa la key de máquina, NUNCA el JWT
+    cred = cfg.resolve(ingest=True)
+    assert cred is not None
+    assert cred.api_key == "a2a_ingest"
+    assert cred.access_token is None
+    # sin ingest: el mismo perfil resuelve al JWT (Bearer), como siempre
+    cred_normal = cfg.resolve()
+    assert cred_normal is not None
+    assert cred_normal.api_key is None
+    assert cred_normal.access_token == "jwt"
+
+
+def test_resolve_ingest_sin_key_no_cae_al_jwt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sin key ingest, el modo ingest deja api_key=None (el gateway rechaza el Bearer)."""
+    monkeypatch.setenv("FOCUSYN_CONFIG", str(tmp_path / "cfg.toml"))
+    for k in ("FOCUSYN_INGEST_KEY", "FOCUSYN_API_KEY", "FOCUSYN_APPLY_KEY", "FOCUSYN_GATEWAY_URL"):
+        monkeypatch.delenv(k, raising=False)
+    cfg.save_config(
+        cfg.Config(profiles={"default": Credential(gateway_url="https://gw", access_token="jwt")})
+    )
+    cred = cfg.resolve(ingest=True)
+    assert cred is not None
+    assert cred.api_key is None
+    assert cred.access_token is None  # ni siquiera se expone el JWT
+
+
+def test_resolve_ingest_env_gana_a_config_ingest_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FOCUSYN_CONFIG", str(tmp_path / "cfg.toml"))
+    monkeypatch.setenv("FOCUSYN_GATEWAY_URL", "https://gw")
+    monkeypatch.setenv("FOCUSYN_INGEST_KEY", "a2a_env")
+    cfg.save_config(cfg.Config(ingest_key="a2a_config"))
+    cred = cfg.resolve(ingest=True)
+    assert cred is not None
+    assert cred.api_key == "a2a_env"  # env pisa el config.ingest_key
+
+
 def test_auth_header_key_vs_bearer() -> None:
     assert Credential(gateway_url="x", api_key="k").auth_header() == {"X-Agent-Key": "k"}
     assert Credential(gateway_url="x", access_token="t").auth_header() == {

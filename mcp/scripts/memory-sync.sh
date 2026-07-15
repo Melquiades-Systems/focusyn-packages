@@ -8,8 +8,10 @@
 #      Por eso se busca el binario en las ubicaciones reales antes de rendirse.
 #   2. Nunca debe fallar ruidosamente: PreCompact con exit != 0 bloquea la compactación. Sale 0 pase
 #      lo que pase; el diagnóstico va al log.
-#   3. La credencial NO viaja acá: el CLI la lee de ~/.config/focusyn/config.toml (0600), que escribe
-#      `focusyn login` / `focusyn init`. Este script no toca claves.
+#   3. La credencial NO viaja acá: el CLI la lee de ~/.config/focusyn/config.toml (0600). El sync
+#      necesita una API key con scope `ingest`; un `focusyn login` deja un JWT y el JWT NO sirve para
+#      el hook. Registrala con `focusyn hooks install --emit-ingest-key` (o `--ingest-key <key>`), o
+#      exportá FOCUSYN_INGEST_KEY. Este script no toca claves.
 set -uo pipefail
 
 EVENT="${1:-hook}"

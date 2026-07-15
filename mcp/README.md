@@ -18,7 +18,11 @@ focusyn agent create mcp-$(hostname) --scopes read,propose,apply,sync   # → im
 # 2. la key, en el entorno (el plugin la lee de ahí; NO se escribe en ningún JSON versionado)
 echo 'export FOCUSYN_MCP_KEY=a2a_…' >> ~/.bashrc && . ~/.bashrc
 
-# 3. el plugin
+# 3. la key del sync de memorias (scope ingest; el JWT del `login` NO sirve para el hook)
+focusyn hooks install --emit-ingest-key    # emite la key ingest y la guarda en el config 0600
+#   (o `focusyn hooks install --ingest-key <key>` si el owner te dio una; o export FOCUSYN_INGEST_KEY)
+
+# 4. el plugin
 claude plugin marketplace add Melquiades-Systems/focusyn-packages
 claude plugin install focusyn@melquiades
 ```
@@ -42,8 +46,16 @@ En Claude Code, lo mismo se teclea `/plugin marketplace add …` + `/plugin inst
 
 | Var | Obligatoria | Default | Para qué |
 |---|---|---|---|
-| `FOCUSYN_MCP_KEY` | **sí** | — | API key de máquina (scopes `read,propose,apply,sync`) |
+| `FOCUSYN_MCP_KEY` | **sí** (para el MCP) | — | API key de máquina (scopes `read,propose,apply,sync`). Si NO está definida en el entorno del proceso `claude`, el header viaja como el **literal** `${FOCUSYN_MCP_KEY}`: el MCP figura `✔ Connected` pero **toda tool da 401** (el gateway ya lo rechaza en el handshake con `AUTH_UNEXPANDED_PLACEHOLDER`). |
 | `FOCUSYN_GATEWAY_URL` | no | `https://focusyn.melquiades.systems` | apuntar a otro gateway (p. ej. `http://localhost:7415` en dev) |
+| `FOCUSYN_INGEST_KEY` | no | — | key del **sync de memorias** (scope `ingest`). Alternativa a guardarla en el config con `focusyn hooks install --emit-ingest-key`/`--ingest-key`. El hook NO puede usar el JWT del `login`. |
+
+> **El sync de memorias necesita su propia key (scope `ingest`), distinta de `FOCUSYN_MCP_KEY`.**
+> `focusyn login` deja un **JWT** en el config, y el hook de `memory sync` **no puede autenticar con
+> JWT** → sin una key `ingest` el sync falla en silencio en cada compactación (es `async` y loguea a
+> `~/.claude/focusyn-memory-sync.log`). Conseguila con `focusyn hooks install --emit-ingest-key` (la
+> emite self-service y la guarda en `~/.config/focusyn/config.toml` 0600) o exportá `FOCUSYN_INGEST_KEY`.
+> `focusyn doctor` avisa si los hooks están puestos pero la key ingest falta.
 
 ## Gotchas
 

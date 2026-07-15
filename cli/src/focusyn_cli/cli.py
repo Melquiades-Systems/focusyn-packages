@@ -354,6 +354,16 @@ def doctor(
     if installed:
         evs = ", ".join(sorted({e for e, _ in installed}))
         typer.secho(f"✓ hooks de memory sync: {evs}", fg=typer.colors.GREEN)
+        # Con hooks instalados, el sync necesita una key ingest usable — el JWT de `login` NO sirve.
+        # Si falta, el hook fallaría EN SILENCIO en cada compactación: se avisa (no rompe doctor).
+        if _has_usable_ingest_key(profile, gateway_url):
+            typer.secho("  ✓ credencial ingest para el hook: presente", fg=typer.colors.GREEN)
+        else:
+            typer.secho(
+                "  ⚠ sin API key 'ingest' usable para el hook (un JWT no sirve): el sync fallaría "
+                "en silencio → `focusyn hooks install --emit-ingest-key`.",
+                fg=typer.colors.YELLOW,
+            )
     else:
         typer.secho(
             "• hooks de memory sync: no instalados → `focusyn hooks install`",
@@ -408,17 +418,146 @@ def version(
 # --------------------------------------------------------------------------- #
 
 
+def _store_ingest_key(key: str) -> Path:
+    """Guarda la key ingest del hook en ``config.ingest_key`` (0600). Devuelve la ruta escrita.
+
+    Vive FUERA de los perfiles: es una key de MÁQUINA para el hook, no tu identidad — así no pisa
+    el JWT que dejó ``focusyn login`` ni tu api_key. La lee ``memory sync`` (``ingest=True``)."""
+    config = cfg.load_config()
+    config.ingest_key = key
+    return cfg.save_config(config)
+
+
+def _default_ingest_agent_name() -> str:
+    """``memory-<hostname>`` saneado (simétrico a ``mcp-<hostname>`` de `mcp install`)."""
+    return ("memory-" + mcp_mod.default_agent_name().removeprefix("mcp-"))[:64]
+
+
+def _emit_ingest_key(
+    profile: str | None,
+    gateway_url: str | None,
+    api_key: str | None,
+    *,
+    name: str,
+    rate_limit: int,
+    rotate: bool,
+) -> str:
+    """Emite (self-service, no-escalada) una API key scope ``ingest`` de máquina y la devuelve.
+
+    Exige que TU credencial tenga ``ingest`` (o ``admin``): el gateway aplica no-escalada, así que
+    pedir un scope que no tenés es un 403 — mejor interceptarlo con un mensaje accionable. Reusa el
+    mismo ``_issue_key`` que ``mcp install`` (rota si el agente ya existe y se pasó rotate)."""
+    with session.client_for(profile, gateway_url, api_key) as client:
+        try:
+            who = client.whoami()
+        except CliError as exc:
+            if "HTTP 404" in exc.message:
+                raise CliError(
+                    "Este gateway todavía no expone el self-service de keys "
+                    "(`/v1/auth/whoami` y `POST /v1/agents`). Pedile al owner una key con scope "
+                    "'ingest' y registrala con `focusyn hooks install --ingest-key <key>`.",
+                    code=2,
+                ) from exc
+            raise
+        mine = [str(s) for s in who.get("scopes", [])]
+        if "admin" not in mine and "ingest" not in mine:
+            raise CliError(
+                f"Tu credencial ({who.get('principal', '?')}) no tiene el scope 'ingest' "
+                f"(tiene: {', '.join(mine) or 'ninguno'}) → no podés emitir una key ingest "
+                "(no-escalada). Pedísela al owner y registrala con "
+                "`focusyn hooks install --ingest-key <key>`.",
+                code=2,
+            )
+        key, _action = _issue_key(client, name, ["ingest"], rate_limit, rotate=rotate)
+    return key
+
+
+def _has_usable_ingest_key(profile: str | None, gateway_url: str | None) -> bool:
+    """¿El hook hallará una key ingest? (local: env / config.ingest_key / perfil.api_key)."""
+    try:
+        cred = cfg.resolve(profile=profile, gateway_url=gateway_url, ingest=True)
+    except CliError:
+        return False
+    return cred is not None and bool(cred.api_key)
+
+
 @hooks_app.command("install")
 def hooks_install(
     events: Annotated[
         str, typer.Option("--events", help="Eventos separados por coma (SessionEnd,PreCompact).")
     ] = "SessionEnd,PreCompact",
+    ingest_key: Annotated[
+        str | None,
+        typer.Option(
+            "--ingest-key",
+            help="Guarda esta API key (scope ingest) para el hook. Inline queda en el historial; "
+            "usá `--ingest-key -` para pegarla oculta.",
+        ),
+    ] = None,
+    emit_ingest_key: Annotated[
+        bool,
+        typer.Option(
+            "--emit-ingest-key",
+            help="Emite una key de máquina scope ingest (self-service) y la guarda para el hook.",
+        ),
+    ] = False,
+    name: Annotated[
+        str | None,
+        typer.Option("--name", help="agent_id de la key ingest (default: memory-<hostname>)."),
+    ] = None,
+    rotate: Annotated[
+        bool, typer.Option("--rotate", help="Si el agente ingest ya existe: rota su key.")
+    ] = False,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Muestra qué haría, sin escribir.")
     ] = False,
+    profile: Annotated[str | None, typer.Option("--profile")] = None,
+    gateway_url: Annotated[
+        str | None, typer.Option("--gateway-url", envvar="FOCUSYN_GATEWAY_URL")
+    ] = None,
+    api_key: Annotated[str | None, typer.Option("--api-key", envvar="FOCUSYN_API_KEY")] = None,
 ) -> None:
-    """Escribe los hooks en ~/.claude/settings.json SIN la key adentro (migra el legacy inline)."""
+    """Escribe los hooks en ~/.claude/settings.json SIN la key adentro (migra el legacy inline).
+
+    El hook corre `focusyn memory sync`, que necesita una API key con scope 'ingest'. Un
+    `focusyn login` deja un JWT, que NO sirve para el hook → conseguí la key con `--emit-ingest-key`
+    (la emite y la guarda) o `--ingest-key <key>`. Sin una key usable, se avisa (el sync fallaría en
+    silencio en cada compactación)."""
     evs = tuple(e.strip() for e in events.split(",") if e.strip())
+
+    # 1. Conseguir/guardar la key ingest del hook, si se pidió.
+    try:
+        if ingest_key is not None:
+            if ingest_key == "-":
+                ingest_key = getpass.getpass("API key ingest a guardar (oculta): ").strip()
+                if not ingest_key:
+                    raise CliError("No ingresaste ninguna key.", code=2)
+            if dry_run:
+                typer.echo(f"  · guardaría la key ingest pasada ({ingest_key[:12]}…) en el config")
+            else:
+                path = _store_ingest_key(ingest_key)
+                typer.secho(f"✓ key ingest guardada en {path} (0600)", fg=typer.colors.GREEN)
+        elif emit_ingest_key:
+            agent_name = name or _default_ingest_agent_name()
+            if dry_run:
+                typer.echo(
+                    f"  · emitiría la key ingest del agente '{agent_name}' (scope ingest) "
+                    "y la guardaría en el config"
+                )
+            else:
+                key = _emit_ingest_key(
+                    profile, gateway_url, api_key, name=agent_name, rate_limit=0, rotate=rotate
+                )
+                _store_ingest_key(key)
+                typer.secho(
+                    f"✓ key ingest emitida para '{agent_name}' y guardada en el config",
+                    fg=typer.colors.GREEN,
+                )
+    except CliError as exc:
+        _fail(exc)
+        return
+
+    # 2. Instalar los hooks (settings.json).
     try:
         result = hooks_mod.install(evs, dry_run=dry_run)
     except FileNotFoundError as exc:
@@ -439,8 +578,23 @@ def hooks_install(
         typer.echo(f"  · backup: {result.backup_path}")
     if dry_run:
         typer.echo(f"  · comando: {hooks_mod.build_command(result.binary, result.events[0])}")
-    else:
-        typer.echo("  · si no surte efecto, abrí `/hooks` una vez o reiniciá la sesión.")
+        return
+
+    typer.echo("  · si no surte efecto, abrí `/hooks` una vez o reiniciá la sesión.")
+
+    # 3. Preflight: el hook no lleva la key inline → si no hay una key ingest resoluble, el sync
+    #    fallaría EN SILENCIO en cada compactación (el hook es async y loguea a un archivo). Ruidoso
+    #    acá vale más que callado allá.
+    if not _has_usable_ingest_key(profile, gateway_url):
+        typer.secho(
+            "⚠ el hook corre `focusyn memory sync`, que necesita una API key con scope 'ingest', y "
+            "no encuentro ninguna usable (ni FOCUSYN_INGEST_KEY, ni config.ingest_key, ni una "
+            "api_key en el perfil — un JWT de `login` NO sirve). El sync fallaría en silencio.\n"
+            "  → emití y guardá una: `focusyn hooks install --emit-ingest-key` (o `--ingest-key "
+            "<key>` si ya tenés una).",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
 
 
 @hooks_app.command("status")
@@ -648,6 +802,19 @@ def mcp_status(
     typer.secho(f"✓ MCP '{server_name}' → {reg.url}", fg=typer.colors.GREEN)
     typer.echo(f"  scope: {reg.scope_flag() or '?'}  ·  key: {reg.key_prefix()}")
 
+    # Falso positivo de la F2: si la key registrada es el literal ${FOCUSYN_MCP_KEY} sin expandir,
+    # Claude Code diría "Connected" pero toda tool daría 401. Se avisa en vez de "validarla" (401
+    # confuso) — pasa con un header por env que no está definido en el proceso `claude`.
+    if mcp_mod.looks_like_unexpanded_placeholder(reg.api_key):
+        typer.secho(
+            f"✗ la key registrada es un placeholder sin expandir ({reg.api_key}): el MCP figura "
+            "'Connected' pero toda tool dará 401.\n"
+            "  → definí esa variable en el entorno del proceso `claude`, o re-registrá con la key "
+            "real (`focusyn mcp install`).",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=1)
+
     if not reg.api_key or not reg.url:
         return
     # La key del header es la verdad: validarla contra el gateway distingue "registrado" de "sirve".
@@ -752,16 +919,29 @@ def memory_sync(
             typer.echo(f"{p.slug}/  → {len(collect_memory_docs(p))} .md (prune={prune})")
         return
 
+    # Modo ingest: la key sale de FOCUSYN_INGEST_KEY / config.ingest_key / perfil.api_key, NUNCA del
+    # JWT del perfil (el gateway rechaza el Bearer para ingest). Ver cfg.resolve(ingest=True).
     try:
-        cred = _resolve(profile, gateway_url, api_key, need_secret=True)
+        cred = cfg.resolve(profile=profile, gateway_url=gateway_url, api_key=api_key, ingest=True)
     except CliError as exc:
         _fail(exc)
+        return
+    if cred is None:
+        _fail(
+            CliError(
+                "No hay gateway configurado. Corré `focusyn init` (o pasá --gateway-url / "
+                "FOCUSYN_GATEWAY_URL).",
+                code=2,
+            )
+        )
         return
     if not cred.api_key:
         _fail(
             CliError(
-                "memory sync necesita una API key con scope 'ingest' "
-                "(el JWT no sirve para el hook)."
+                "memory sync necesita una API key con scope 'ingest'; un `focusyn login` guarda un "
+                "JWT y el JWT NO sirve para el hook. Registrá una: "
+                "`focusyn hooks install --emit-ingest-key` (la emite y la guarda) o "
+                "`--ingest-key <key>`; o exportá FOCUSYN_INGEST_KEY."
             )
         )
         return
@@ -1042,8 +1222,10 @@ EMPEZAR DESDE CERO
   focusyn login                  autenticate con tu usuario de la web (JWT, se renueva solo)
   focusyn init                   o pegá una API key / un blob `focusyn-invite:` (--invite)
   focusyn mcp install            emite la key de máquina y registra el MCP en Claude Code
-  focusyn hooks install          sincroniza tus memorias de Claude Code al corpus, solo
-  focusyn doctor                 gateway + credencial + scopes + hooks, en una pantalla
+  focusyn hooks install --emit-ingest-key
+                                 sincroniza tus memorias al corpus (emite y guarda la key
+                                 ingest del hook; `login` deja un JWT, que el hook NO puede usar)
+  focusyn doctor                 gateway + credencial + scopes + hooks + key ingest, en una pantalla
 
 LEER
   read · list · search · ask · map        (search/ask son notas y ADR, no código:

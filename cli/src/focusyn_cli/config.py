@@ -69,10 +69,17 @@ class Credential:
 
 @dataclass
 class Config:
-    """El archivo de config completo: perfiles + cuál es el default."""
+    """El archivo de config completo: perfiles + cuál es el default + la key del hook de memorias.
+
+    ``ingest_key`` es la API key (scope ``ingest``) que usa el hook de ``memory sync``. Vive FUERA
+    de los perfiles a propósito: es una key de MÁQUINA para el hook, no tu identidad — y el flujo
+    común ``focusyn login`` deja un JWT en el perfil, que ``memory sync`` no puede usar. Separarla
+    hace que "login + hooks install" pueda dejar el sync andando sin pisar tu credencial personal.
+    """
 
     default_profile: str = _DEFAULT_PROFILE
     profiles: dict[str, Credential] = field(default_factory=dict)
+    ingest_key: str | None = None
 
 
 def validate_gateway_url(url: str, *, source: str = "") -> str:
@@ -130,9 +137,11 @@ def load_config() -> Config:
             refresh_token=body.get("refresh_token"),
             tenant=body.get("tenant"),
         )
+    ingest_key = raw.get("ingest_key")
     return Config(
         default_profile=str(raw.get("default_profile", _DEFAULT_PROFILE)),
         profiles=profiles,
+        ingest_key=str(ingest_key) if ingest_key else None,
     )
 
 
@@ -144,6 +153,8 @@ def save_config(config: Config) -> Path:
     with contextlib.suppress(OSError):
         os.chmod(path.parent, 0o700)
     body: dict[str, object] = {"default_profile": config.default_profile, "profiles": {}}
+    if config.ingest_key:
+        body["ingest_key"] = config.ingest_key
     for name, cred in config.profiles.items():
         entry: dict[str, str] = {"gateway_url": cred.gateway_url}
         for k in ("api_key", "access_token", "refresh_token", "tenant"):
@@ -165,6 +176,7 @@ def resolve(
     profile: str | None = None,
     gateway_url: str | None = None,
     api_key: str | None = None,
+    ingest: bool = False,
 ) -> Credential | None:
     """La credencial EFECTIVA de un comando, con precedencia flag > entorno > perfil.
 
@@ -172,6 +184,11 @@ def resolve(
     pedir ``focusyn init``). Una credencial sin secreto (sólo URL) es válida para los endpoints
     públicos (``/v1/capabilities``). Eleva ``CliError`` si la URL efectiva no es segura
     (:func:`validate_gateway_url`) — venga del flag, del entorno o de un config editado a mano.
+
+    ``ingest=True`` es el modo del hook de ``memory sync``: la key se resuelve
+    flag > entorno > :attr:`Config.ingest_key` > ``perfil.api_key``, y NUNCA cae al JWT del perfil
+    (el gateway rechaza el Bearer para ``ingest``). Así el hook usa la key de máquina dedicada aun
+    si el perfil default es un ``login`` (JWT), y ``memory sync`` no revienta en cada compactación.
     """
     config = load_config()
     name = profile or config.default_profile
@@ -184,6 +201,10 @@ def resolve(
     if not url:
         return None
     url = validate_gateway_url(url)
+    if ingest:
+        key = api_key or env_key or config.ingest_key or (base.api_key if base else None)
+        # El hook no puede autenticar con Bearer → ni access ni refresh token en modo ingest.
+        return Credential(gateway_url=url, api_key=key, tenant=base.tenant if base else None)
     key = api_key or env_key or (base.api_key if base else None)
     return Credential(
         gateway_url=url,

@@ -39,6 +39,16 @@ DEFAULT_SCOPES: tuple[str, ...] = ("read", "propose", "apply", "sync")
 DEFAULT_CLAUDE_SCOPE = "user"
 
 _NAME_RE = re.compile(r"[^a-z0-9._-]+")
+# Referencia a env var SIN expandir (``${FOO}`` / ``${FOO:-default}``). El plugin declara el header
+# ``X-Agent-Key: ${FOCUSYN_MCP_KEY}`` y Claude Code lo deja LITERAL si la variable no está en el
+# entorno del proceso → "Connected" engañoso con las tools en 401. Una key real (``a2a_…``) nunca
+# tiene esta forma. El gateway ya lo rechaza en el handshake; acá se detecta client-side y avisa.
+_PLACEHOLDER_RE = re.compile(r"^\$\{[^}]+\}$")
+
+
+def looks_like_unexpanded_placeholder(value: str | None) -> bool:
+    """True si ``value`` es una referencia de env var sin expandir (``${VAR}``)."""
+    return bool(value and _PLACEHOLDER_RE.match(value.strip()))
 
 
 @dataclass
@@ -149,6 +159,15 @@ def add(
     # Nunca registrar un endpoint http:// en Claude Code: quedaría PERSISTIDO y mandaría la key
     # en claro en cada sesión, no una vez.
     validate_gateway_url(gateway_url)
+    # Nunca registrar un placeholder ${VAR} literal como key: dejaría un MCP "Connected" cuyas tools
+    # dan todas 401 (el gateway exige presencia en el handshake, valida por-tool). El plugin usa esa
+    # forma a propósito —Claude Code la expande del entorno—, pero `mcp add` NO la expande.
+    if looks_like_unexpanded_placeholder(api_key):
+        raise CliError(
+            f"La key a registrar es un placeholder sin expandir ({api_key}). `claude mcp add` NO "
+            "lo expande: registraría un MCP que conecta pero cuyas tools dan 401. Pasá la key real "
+            "(emitila con `focusyn mcp install`) o exportá la variable y dejá que el PLUGIN la use."
+        )
     binary = claude_binary()
     url = mcp_url(gateway_url)
     if replace and get(name) is not None:

@@ -161,6 +161,28 @@ def test_add_reemplaza_el_registro_previo(claude: _ClaudeCalls) -> None:
     assert claude.servers["focusyn"]["key"] == "a2a_k"
 
 
+@pytest.mark.parametrize(
+    ("value", "esperado"),
+    [
+        ("${FOCUSYN_MCP_KEY}", True),
+        ("  ${FOCUSYN_MCP_KEY}  ", True),
+        ("${FOCUSYN_GATEWAY_URL:-x}", True),
+        ("a2a_supersecretkey123", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_looks_like_unexpanded_placeholder(value: str | None, esperado: bool) -> None:
+    assert mcp_mod.looks_like_unexpanded_placeholder(value) is esperado
+
+
+def test_add_rechaza_una_key_placeholder(claude: _ClaudeCalls) -> None:
+    """`claude mcp add` NO expande ${VAR}: registrar el literal dejaría un MCP con tools en 401."""
+    with pytest.raises(CliError, match="placeholder sin expandir"):
+        mcp_mod.add("focusyn", "https://gw", "${FOCUSYN_MCP_KEY}")
+    assert not [c for c in claude if c[2] == "add"]  # no registró nada
+
+
 def test_add_propaga_el_fallo_del_cli_de_claude(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(mcp_mod, "claude_binary", lambda: "/usr/bin/claude")
     monkeypatch.setattr(
@@ -341,6 +363,25 @@ def test_status_sin_registro(monkeypatch: pytest.MonkeyPatch) -> None:
     result = runner.invoke(app, ["mcp", "status"])
     assert result.exit_code == 0
     assert "no registrado" in result.stdout
+
+
+def test_status_key_placeholder_avisa_y_no_valida(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Key registrada = ${FOCUSYN_MCP_KEY} literal → avisa (no la valida: sería un 401 confuso)."""
+    monkeypatch.setattr(
+        mcp_mod,
+        "get",
+        lambda name=mcp_mod.DEFAULT_SERVER_NAME: mcp_mod.Registration(
+            name=name, url="https://gw/mcp/", api_key="${FOCUSYN_MCP_KEY}", raw=_GET_OUTPUT
+        ),
+    )
+    # Si intentara validar contra el gateway, este boom lo delataría: no debe llamarse.
+    monkeypatch.setattr(
+        "focusyn_cli.cli.GatewayClient",
+        lambda *a, **k: pytest.fail("no debe validar un placeholder contra el gateway"),
+    )
+    result = runner.invoke(app, ["mcp", "status"])
+    assert result.exit_code == 1
+    assert "placeholder sin expandir" in result.stdout
 
 
 def test_uninstall_desregistra(claude: _ClaudeCalls) -> None:

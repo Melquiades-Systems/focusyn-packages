@@ -16,7 +16,9 @@ import httpx
 import pytest
 from typer.testing import CliRunner
 
+from focusyn_cli import config as cfg
 from focusyn_cli.cli import app
+from focusyn_cli.config import Credential
 from focusyn_cli.memory_sync import (
     MemoryProject,
     MemorySyncClient,
@@ -24,6 +26,13 @@ from focusyn_cli.memory_sync import (
     collect_memory_docs,
     discover_projects,
 )
+
+
+def _isolate_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Config aislado + sin FOCUSYN_* del shell contaminando la resolución de credencial."""
+    monkeypatch.setenv("FOCUSYN_CONFIG", str(tmp_path / "config.toml"))
+    for k in ("FOCUSYN_INGEST_KEY", "FOCUSYN_API_KEY", "FOCUSYN_APPLY_KEY", "FOCUSYN_GATEWAY_URL"):
+        monkeypatch.delenv(k, raising=False)
 
 runner = CliRunner()
 
@@ -208,12 +217,53 @@ def test_cli_dry_run_sin_red(tmp_path: Path) -> None:
 
 
 def test_cli_sin_api_key_falla(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # Gateway configurado por env, pero SIN key → debe fallar pidiendo una.
+    # Gateway configurado por env, pero SIN key ingest → debe fallar pidiendo una.
+    _isolate_env(tmp_path, monkeypatch)
     monkeypatch.setenv("FOCUSYN_GATEWAY_URL", "https://gw:7415")
     _make_project(tmp_path, "proj-a", {"MEMORY.md": "a"})
     result = runner.invoke(app, ["memory", "sync", "--projects-root", str(tmp_path)])
     assert result.exit_code != 0
-    assert "api-key" in result.stdout.lower() or "api-key" in str(result.output).lower()
+    out = result.output.lower()
+    assert "ingest" in out and ("--ingest-key" in out or "focusyn_ingest_key" in out)
+
+
+def test_cli_jwt_no_sirve_para_el_hook(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """El caso roto de la F2: perfil con JWT (login) sin key ingest → error CLARO, no silencio.
+
+    Antes el hook (async, loguea a un archivo) fallaba callado en cada compactación."""
+    _isolate_env(tmp_path, monkeypatch)
+    cfg.save_config(
+        cfg.Config(profiles={"default": Credential(gateway_url="https://gw", access_token="jwt")})
+    )
+    _make_project(tmp_path, "proj-a", {"MEMORY.md": "a"})
+    result = runner.invoke(app, ["memory", "sync", "--projects-root", str(tmp_path)])
+    assert result.exit_code != 0
+    assert "JWT" in result.output and "ingest" in result.output.lower()
+
+
+def test_cli_usa_la_ingest_key_del_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """login (JWT) + config.ingest_key → el hook usa la key de máquina, no revienta."""
+    _isolate_env(tmp_path, monkeypatch)
+    cfg.save_config(
+        cfg.Config(
+            profiles={"default": Credential(gateway_url="https://gw", access_token="jwt")},
+            ingest_key="a2a_config_ingest",
+        )
+    )
+    _make_project(tmp_path, "proj-a", {"MEMORY.md": "a"})
+
+    seen: dict[str, str] = {}
+
+    class _Recorder(_FakeClient):
+        def __init__(self, gateway_url: str, api_key: str, **kwargs: object) -> None:
+            seen["api_key"] = api_key
+            super().__init__(gateway_url, api_key, **kwargs)
+
+    _CLI_CALLS.clear()
+    monkeypatch.setattr("focusyn_cli.cli.MemorySyncClient", _Recorder)
+    result = runner.invoke(app, ["memory", "sync", "--projects-root", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert seen["api_key"] == "a2a_config_ingest"  # usó la key del config, no el JWT
 
 
 _CLI_CALLS: list[tuple[str, bool]] = []
