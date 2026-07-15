@@ -18,6 +18,5 @@
         "X-Agent-Key": "${FOCUSYN_MCP_KEY}"
       }
     }
-  },
-  "hooks": "./hooks/hooks.json"
+  }
 }
