@@ -176,6 +176,16 @@ def test_build_command_quotea_el_binario(claude_dir: Path) -> None:
     assert "'/home/mi usuario/.local/bin/focusyn' memory sync --quiet" in cmd
 
 
+def test_build_command_nunca_falla_el_hook(claude_dir: Path) -> None:
+    """El hook debe salir 0 SIEMPRE: ``memory sync`` sale 3 cuando hay conflictos.
+
+    Sin el ``|| true``, un conflicto (algo que decidir, no un fallo) haría que el
+    ``PreCompact`` devolviera ≠ 0 y **bloqueara la compactación** del contexto.
+    """
+    cmd = h.build_command(_FAKE_BIN, "PreCompact")
+    assert "memory sync --quiet || true" in cmd
+
+
 def test_install_rechaza_un_evento_desconocido(claude_dir: Path) -> None:
     """`--events` es input del usuario y acaba DENTRO de un comando de shell: lista blanca.
 

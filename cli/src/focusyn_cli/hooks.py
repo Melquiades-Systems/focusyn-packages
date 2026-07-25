@@ -82,10 +82,14 @@ def build_command(binary: str, event: str) -> str:
     cerraba el literal y dejaba escrito un comando arbitrario que corre solo en cada SessionEnd; y
     un ``$HOME`` con espacios rompía el hook en silencio (es ``async`` y loguea a un archivo).
     ``event`` además se valida contra la lista blanca de eventos en :func:`install`.
+
+    El ``|| true`` es load-bearing: ``memory sync`` sale **3** cuando hay conflictos (algo que
+    decidir, no un fallo), y un ``PreCompact`` con exit ≠ 0 **bloquearía la compactación**. El
+    hook informa por el log; no es el lugar donde se atiende un conflicto.
     """
     log = _log_path()
     return (
-        f"{{ date '+[{event} %F %T]'; {shlex.quote(binary)} memory sync --quiet; }} "
+        f"{{ date '+[{event} %F %T]'; {shlex.quote(binary)} memory sync --quiet || true; }} "
         f">> {shlex.quote(str(log))} 2>&1"
     )
 

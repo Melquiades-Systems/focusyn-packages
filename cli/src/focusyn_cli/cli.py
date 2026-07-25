@@ -54,13 +54,24 @@ from focusyn_cli.deadcode import (
 from focusyn_cli.http import CliError, GatewayClient, check_url, version_warning
 from focusyn_cli.memory_sync import (
     DEFAULT_PROJECTS_ROOT,
+    Action,
+    MemoryProject,
     MemorySyncClient,
+    PlanItem,
+    ProjectSyncResult,
+    apply_plan,
+    body_hash_of,
     collect_memory_docs,
     discover_projects,
+    load_journal,
+    plan_project,
+    project_for_slug,
+    save_journal,
+    write_memory_doc,
 )
 
 app = typer.Typer(help="CLI cliente de focusyn (HTTP; autorizado por scopes del gateway).")
-memory_app = typer.Typer(help="Sync de memorias de Claude Code al corpus.")
+memory_app = typer.Typer(help="Sync de memorias de Claude Code con el corpus (bidireccional).")
 attachment_app = typer.Typer(help="Subida de binarios (adjuntos) por multipart.")
 hooks_app = typer.Typer(help="Hooks de Claude Code que automatizan `memory sync`.")
 mcp_app = typer.Typer(help="El MCP focusyn en Claude Code: emite la key y lo registra por vos.")
@@ -862,8 +873,70 @@ def mcp_uninstall(
 
 
 # --------------------------------------------------------------------------- #
-# memory sync
+# memory sync / status / resolve / forget
 # --------------------------------------------------------------------------- #
+
+
+def _ingest_credential(
+    profile: str | None, gateway_url: str | None, api_key: str | None
+) -> Credential:
+    """Resuelve la credencial de scope ``ingest`` o aborta con un mensaje accionable.
+
+    Modo ingest: la key sale de FOCUSYN_INGEST_KEY / config.ingest_key / perfil.api_key, NUNCA
+    del JWT del perfil (el gateway rechaza el Bearer para ingest).
+    """
+    try:
+        cred = cfg.resolve(profile=profile, gateway_url=gateway_url, api_key=api_key, ingest=True)
+    except CliError as exc:
+        _fail(exc)
+        raise typer.Exit(code=2) from exc
+    if cred is None:
+        _fail(
+            CliError(
+                "No hay gateway configurado. Corré `focusyn init` (o pasá --gateway-url / "
+                "FOCUSYN_GATEWAY_URL).",
+                code=2,
+            )
+        )
+        raise typer.Exit(code=2)
+    if not cred.api_key:
+        _fail(
+            CliError(
+                "memory sync necesita una API key con scope 'ingest'; un `focusyn login` guarda un "
+                "JWT y el JWT NO sirve para el hook. Registrá una: "
+                "`focusyn hooks install --emit-ingest-key` (la emite y la guarda) o "
+                "`--ingest-key <key>`; o exportá FOCUSYN_INGEST_KEY."
+            )
+        )
+        raise typer.Exit(code=2)
+    return cred
+
+
+def _select_projects(
+    projects_root: Path, project: list[str] | None, *, quiet: bool = False
+) -> list[MemoryProject]:
+    """Proyectos a reconciliar. Un slug pedido explícitamente entra aunque no tenga ``memory/``.
+
+    Esa asimetría es deliberada: sin ``--project`` sólo participan los que tienen memorias
+    locales (un ``memory/`` vacío ya no significa nada), pero pedir un slug por nombre es
+    intención suficiente para traerse del corpus lo que esta máquina todavía no tiene.
+    """
+    if project:
+        return [project_for_slug(projects_root, slug) for slug in dict.fromkeys(project)]
+    found = discover_projects(projects_root)
+    if not found and not quiet:
+        typer.secho("No hay proyectos con memorias locales.", fg=typer.colors.YELLOW)
+    return found
+
+
+def _print_conflicts(conflicts: list[PlanItem]) -> None:
+    """Muestra los conflictos con la ruta y el porqué, más el comando que los cierra."""
+    for item in conflicts:
+        typer.secho(f"  ⚠ CONFLICTO {item.rel_path} — {item.reason}", fg=typer.colors.YELLOW)
+    if conflicts:
+        typer.echo(
+            "    resolvé con: focusyn memory resolve --prefer-local|--prefer-remote <rel_path>"
+        )
 
 
 @memory_app.command("sync")
@@ -884,74 +957,54 @@ def memory_sync(
     project: Annotated[
         list[str] | None, typer.Option("--project", help="Limita a estos slugs (repetible).")
     ] = None,
-    no_prune: Annotated[bool, typer.Option("--no-prune", help="No borra los ausentes.")] = False,
+    pull_only: Annotated[
+        bool, typer.Option("--pull-only", help="Sólo descarga; no sube nada.")
+    ] = False,
+    push_only: Annotated[
+        bool, typer.Option("--push-only", help="Sólo sube; no descarga nada.")
+    ] = False,
     dry_run: Annotated[
-        bool, typer.Option("--dry-run", help="Lista sin llamar al gateway.")
+        bool, typer.Option("--dry-run", help="Muestra el plan REAL (consulta el gateway).")
     ] = False,
     quiet: Annotated[
         bool, typer.Option("--quiet", help="Imprime sólo si hubo cambios o error (para el hook).")
     ] = False,
 ) -> None:
-    """Reconcilia ``~/.claude/projects/<proj>/memory/*.md`` con la partición corpus.
+    """Reconcilia ``~/.claude/projects/<proj>/memory/*.md`` con el corpus, en ambos sentidos.
+
+    Sube lo que cambió acá, descarga lo que cambió en otra máquina y **nunca borra**: si un
+    archivo cambió de los dos lados, lo reporta como conflicto y no toca ninguno. Borrar del
+    corpus es ``focusyn memory forget``.
 
     La credencial (scope ``ingest``) sale del perfil; --api-key/--gateway-url la sobrescriben.
-    Re-correr es no-op; borrar una memoria local la borra del índice en el próximo sync.
     """
-    # dry-run es 100% local (lista archivos): no necesita gateway ni credencial.
-    projects = discover_projects(projects_root)
-    if project:
-        only = set(project)
-        for slug in sorted(only - {p.slug for p in projects}):
-            if not quiet:
-                typer.secho(
-                    f"  ⚠ proyecto sin memory/: {slug} (omitido)", fg=typer.colors.YELLOW, err=True
-                )
-        projects = [p for p in projects if p.slug in only]
-
+    projects = _select_projects(projects_root, project, quiet=quiet)
     if not projects:
-        if not quiet:
-            typer.secho("No hay proyectos con memory/ que sincronizar.", fg=typer.colors.YELLOW)
         return
+    cred = _ingest_credential(profile, gateway_url, api_key)
 
-    prune = not no_prune
-    if dry_run:
-        for p in projects:
-            typer.echo(f"{p.slug}/  → {len(collect_memory_docs(p))} .md (prune={prune})")
-        return
-
-    # Modo ingest: la key sale de FOCUSYN_INGEST_KEY / config.ingest_key / perfil.api_key, NUNCA del
-    # JWT del perfil (el gateway rechaza el Bearer para ingest). Ver cfg.resolve(ingest=True).
-    try:
-        cred = cfg.resolve(profile=profile, gateway_url=gateway_url, api_key=api_key, ingest=True)
-    except CliError as exc:
-        _fail(exc)
-        return
-    if cred is None:
-        _fail(
-            CliError(
-                "No hay gateway configurado. Corré `focusyn init` (o pasá --gateway-url / "
-                "FOCUSYN_GATEWAY_URL).",
-                code=2,
-            )
-        )
-        return
-    if not cred.api_key:
-        _fail(
-            CliError(
-                "memory sync necesita una API key con scope 'ingest'; un `focusyn login` guarda un "
-                "JWT y el JWT NO sirve para el hook. Registrá una: "
-                "`focusyn hooks install --emit-ingest-key` (la emite y la guarda) o "
-                "`--ingest-key <key>`; o exportá FOCUSYN_INGEST_KEY."
-            )
-        )
-        return
-
-    created = updated = unchanged = deleted = err = 0
+    up = down = same = err = 0
+    conflicts: list[PlanItem] = []
+    new_base: dict[str, str] = {}
+    prefixes: list[str] = []
     assert cred.api_key is not None
     with MemorySyncClient(cred.gateway_url, cred.api_key) as client:
+        base = load_journal(cred.gateway_url)
         for p in projects:
             try:
-                r = client.sync_project(p, prune=prune)
+                plan, local, remote = plan_project(client, p, base)
+                if pull_only:
+                    plan = [i for i in plan if i.action is not Action.UPLOAD]
+                if push_only:
+                    plan = [i for i in plan if i.action is not Action.DOWNLOAD]
+                if dry_run:
+                    _report_plan(p.slug, plan, quiet=quiet)
+                    conflicts.extend(i for i in plan if i.action is Action.CONFLICT)
+                    up += sum(1 for i in plan if i.action is Action.UPLOAD)
+                    down += sum(1 for i in plan if i.action is Action.DOWNLOAD)
+                    same += sum(1 for i in plan if i.action is Action.NOOP)
+                    continue
+                result, base_delta = apply_plan(client, p, plan, local, remote)
             except httpx.HTTPStatusError as exc:
                 typer.secho(
                     f"  ✗ {p.slug}: HTTP {exc.response.status_code} {exc.response.text[:200]}",
@@ -964,28 +1017,179 @@ def memory_sync(
                 typer.secho(f"  ✗ {p.slug}: {exc}", fg=typer.colors.RED, err=True)
                 err += 1
                 continue
-            created += r.created
-            updated += r.updated
-            unchanged += r.unchanged
-            deleted += r.deleted
-            err += len(r.errors)
-            changed = r.created or r.updated or r.deleted or r.errors
-            if not quiet or changed:
-                line = (
-                    f"  {p.slug}/  sent={r.sent} created={r.created} updated={r.updated} "
-                    f"unchanged={r.unchanged} deleted={r.deleted}"
-                )
-                if r.errors:
-                    line += f" errors={len(r.errors)}"
-                typer.echo(line)
 
-    if not quiet or created or updated or deleted or err:
+            new_base.update(base_delta)
+            prefixes.append(result.path_prefix)
+            up += result.uploaded
+            down += result.downloaded
+            same += result.unchanged
+            err += len(result.errors)
+            conflicts.extend(result.conflicts)
+            if not quiet or result.changed:
+                _report_result(result)
+
+    # El journal se persiste sólo con lo efectivamente convergido, y nunca en dry-run: una
+    # base escrita sin haber movido los archivos haría que la próxima corrida no viera nada.
+    if not dry_run and prefixes:
+        save_journal(cred.gateway_url, new_base, path_prefixes=prefixes)
+
+    if not quiet or up or down or conflicts or err:
+        verb = "se subirían/bajarían" if dry_run else "subidos/bajados"
         typer.echo(
-            f"Total: created={created} updated={updated} unchanged={unchanged} "
-            f"deleted={deleted} errors={err}"
+            f"Total: {verb} {up}/{down} · sin cambios {same} · "
+            f"conflictos {len(conflicts)} · errores {err}"
         )
+    if conflicts:
+        raise typer.Exit(code=3)  # ≠ error de transporte: hay algo que decidir
     if err:
         raise typer.Exit(code=1)
+
+
+def _report_plan(slug: str, plan: list[PlanItem], *, quiet: bool) -> None:
+    """Imprime el plan de un proyecto (modo --dry-run)."""
+    moves = [i for i in plan if i.action is not Action.NOOP]
+    if not moves and quiet:
+        return
+    typer.echo(f"  {slug}/  {len(plan)} docs · {len(moves)} movimientos")
+    for item in moves:
+        icon = {Action.UPLOAD: "↑", Action.DOWNLOAD: "↓", Action.CONFLICT: "⚠"}[item.action]
+        color = typer.colors.YELLOW if item.action is Action.CONFLICT else None
+        typer.secho(f"    {icon} {item.rel_path} — {item.reason}", fg=color)
+
+
+def _report_result(result: ProjectSyncResult) -> None:
+    """Imprime el resultado real de un proyecto."""
+    typer.echo(
+        f"  {result.slug}/  ↑{result.uploaded} ↓{result.downloaded} "
+        f"={result.unchanged} ⚠{len(result.conflicts)}"
+    )
+    _print_conflicts(result.conflicts)
+    for e in result.errors:
+        typer.secho(f"    ✗ {e}", fg=typer.colors.RED, err=True)
+
+
+@memory_app.command("status")
+def memory_status(
+    profile: Annotated[str | None, typer.Option("--profile")] = None,
+    api_key: Annotated[
+        str | None, typer.Option("--api-key", envvar="FOCUSYN_INGEST_KEY")
+    ] = None,
+    gateway_url: Annotated[
+        str | None, typer.Option("--gateway-url", envvar="FOCUSYN_GATEWAY_URL")
+    ] = None,
+    projects_root: Annotated[Path, typer.Option("--projects-root")] = DEFAULT_PROJECTS_ROOT,
+    project: Annotated[list[str] | None, typer.Option("--project")] = None,
+) -> None:
+    """Muestra las divergencias con el corpus sin tocar nada (ni disco ni gateway)."""
+    projects = _select_projects(projects_root, project)
+    if not projects:
+        return
+    cred = _ingest_credential(profile, gateway_url, api_key)
+    assert cred.api_key is not None
+    total = 0
+    with MemorySyncClient(cred.gateway_url, cred.api_key) as client:
+        base = load_journal(cred.gateway_url)
+        for p in projects:
+            plan, _, _ = plan_project(client, p, base)
+            moves = [i for i in plan if i.action is not Action.NOOP]
+            total += len(moves)
+            _report_plan(p.slug, plan, quiet=True)
+    if not total:
+        typer.secho("Todo sincronizado.", fg=typer.colors.GREEN)
+
+
+@memory_app.command("resolve")
+def memory_resolve(
+    rel_path: Annotated[str, typer.Argument(help="Ruta del conflicto ('<slug>/<archivo>.md').")],
+    prefer_local: Annotated[
+        bool, typer.Option("--prefer-local", help="Gana tu copia: se sube al corpus.")
+    ] = False,
+    prefer_remote: Annotated[
+        bool, typer.Option("--prefer-remote", help="Gana la del corpus: se escribe acá.")
+    ] = False,
+    profile: Annotated[str | None, typer.Option("--profile")] = None,
+    api_key: Annotated[
+        str | None, typer.Option("--api-key", envvar="FOCUSYN_INGEST_KEY")
+    ] = None,
+    gateway_url: Annotated[
+        str | None, typer.Option("--gateway-url", envvar="FOCUSYN_GATEWAY_URL")
+    ] = None,
+    projects_root: Annotated[Path, typer.Option("--projects-root")] = DEFAULT_PROJECTS_ROOT,
+) -> None:
+    """Resuelve UN conflicto eligiendo un lado. No fusiona: elegí, o editá el archivo a mano."""
+    if prefer_local == prefer_remote:
+        _fail(CliError("elegí exactamente uno: --prefer-local o --prefer-remote"))
+        return
+    slug = rel_path.split("/", 1)[0]
+    if slug == rel_path:
+        _fail(CliError(f"rel_path debe incluir el slug del proyecto: '<slug>/{rel_path}'"))
+        return
+    p = project_for_slug(projects_root, slug)
+    cred = _ingest_credential(profile, gateway_url, api_key)
+    assert cred.api_key is not None
+
+    with MemorySyncClient(cred.gateway_url, cred.api_key) as client:
+        if prefer_local:
+            contents = dict(collect_memory_docs(p))
+            if rel_path not in contents:
+                _fail(CliError(f"no existe localmente: {rel_path}"))
+                return
+            out = client.push([(rel_path, contents[rel_path])], path_prefix=f"{slug}/")
+            if out.errors:
+                _fail(CliError("; ".join(out.errors)))
+                return
+            resolved_hash = body_hash_of(contents[rel_path])
+            typer.secho(f"✓ subida tu copia de {rel_path}", fg=typer.colors.GREEN)
+        else:
+            docs, errors = client.fetch([rel_path])
+            if errors or not docs:
+                _fail(CliError(errors[0] if errors else f"no existe en el corpus: {rel_path}"))
+                return
+            write_memory_doc(p, rel_path, docs[0][1])
+            resolved_hash = body_hash_of(docs[0][1])
+            typer.secho(f"✓ escrita la copia del corpus en {rel_path}", fg=typer.colors.GREEN)
+
+    # Sembrar la base cierra el conflicto: sin esto, la próxima corrida volvería a verlo.
+    save_journal(cred.gateway_url, {rel_path: resolved_hash}, path_prefixes=[])
+
+
+@memory_app.command("forget")
+def memory_forget(
+    rel_paths: Annotated[list[str], typer.Argument(help="Rutas a borrar ('<slug>/<archivo>.md').")],
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="No preguntar.")] = False,
+    profile: Annotated[str | None, typer.Option("--profile")] = None,
+    api_key: Annotated[
+        str | None, typer.Option("--api-key", envvar="FOCUSYN_INGEST_KEY")
+    ] = None,
+    gateway_url: Annotated[
+        str | None, typer.Option("--gateway-url", envvar="FOCUSYN_GATEWAY_URL")
+    ] = None,
+) -> None:
+    """Borra memorias del CORPUS (no de tu disco). Único camino de borrado: explícito.
+
+    El sync jamás borra por su cuenta, así que una memoria que ya no querés compartir se
+    retira acá. Idempotente: borrar algo ya ausente no es error.
+    """
+    bad = [p for p in rel_paths if "/" not in p]
+    if bad:
+        _fail(CliError(f"cada ruta debe incluir el slug del proyecto: {bad[:3]}"))
+        return
+    if not yes:
+        typer.echo("Se borrarán del corpus (tu disco no se toca):")
+        for p in rel_paths:
+            typer.echo(f"  · {p}")
+        if not typer.confirm("¿Confirmás?"):
+            typer.echo("Cancelado.")
+            return
+    cred = _ingest_credential(profile, gateway_url, api_key)
+    assert cred.api_key is not None
+    with MemorySyncClient(cred.gateway_url, cred.api_key) as client:
+        out = client.forget(rel_paths)
+    if out.errors:
+        for e in out.errors:
+            typer.secho(f"  ✗ {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    typer.secho(f"✓ {out.deleted} borradas del corpus", fg=typer.colors.GREEN)
 
 
 # --------------------------------------------------------------------------- #
