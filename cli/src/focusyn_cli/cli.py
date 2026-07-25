@@ -1098,7 +1098,14 @@ def memory_status(
         typer.secho("Todo sincronizado.", fg=typer.colors.GREEN)
 
 
-@memory_app.command("resolve")
+@memory_app.command(
+    "resolve",
+    # Los slugs de Claude Code derivan del path absoluto → SIEMPRE empiezan con '-'
+    # ('-home-usuario-proyecto/MEMORY.md'), y click trata cualquier token que empiece con
+    # '-' como una opción: sin esto, el caso NORMAL fallaba con "No such option: -h" y
+    # había que acordarse del separador '--'. Las opciones conocidas se siguen parseando.
+    context_settings={"ignore_unknown_options": True},
+)
 def memory_resolve(
     rel_path: Annotated[str, typer.Argument(help="Ruta del conflicto ('<slug>/<archivo>.md').")],
     prefer_local: Annotated[
@@ -1153,10 +1160,19 @@ def memory_resolve(
     save_journal(cred.gateway_url, {rel_path: resolved_hash}, path_prefixes=[])
 
 
-@memory_app.command("forget")
+@memory_app.command(
+    "forget",
+    # Igual que `resolve`: los rel_path empiezan con '-' (el slug), que click leería como
+    # una opción. Ver el comentario de arriba.
+    context_settings={"ignore_unknown_options": True},
+)
 def memory_forget(
     rel_paths: Annotated[list[str], typer.Argument(help="Rutas a borrar ('<slug>/<archivo>.md').")],
-    yes: Annotated[bool, typer.Option("--yes", "-y", help="No preguntar.")] = False,
+    # SIN alias corto a propósito: los rel_path empiezan con '-' y click parsea ese token
+    # como un grupo de flags cortos, consumiendo las letras que coincidan. Con `-y` activo,
+    # `-home-usuario-miproyecto/x.md` llegaba como `-home-usuario-miproecto/x.md` —el path
+    # CORROMPIDO en silencio, apuntando a un borrado distinto del pedido.
+    yes: Annotated[bool, typer.Option("--yes", help="No preguntar.")] = False,
     profile: Annotated[str | None, typer.Option("--profile")] = None,
     api_key: Annotated[
         str | None, typer.Option("--api-key", envvar="FOCUSYN_INGEST_KEY")

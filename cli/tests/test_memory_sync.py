@@ -657,6 +657,86 @@ def test_cli_resolve_prefer_local_sube(tmp_path: Path, monkeypatch: pytest.Monke
     assert disco.read_text(encoding="utf-8") == "mi versión"  # el local no se toca
 
 
+def test_cli_resolve_acepta_un_slug_real(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Los slugs REALES empiezan con '-' y click los leía como una opción.
+
+    Regresión de producción: `memory resolve -home-melquiades-focusyn/MEMORY.md
+    --prefer-local` moría con "No such option: -h" — o sea el caso NORMAL, no un borde,
+    porque el slug deriva del path absoluto y siempre arranca en guion.
+    """
+    _isolate_env(tmp_path, monkeypatch)
+    _make_project(tmp_path, _REAL_SLUG, {"MEMORY.md": "mi versión"})
+    handler = _gateway(
+        state={f"{_REAL_SLUG}/MEMORY.md": "h"}, contents={f"{_REAL_SLUG}/MEMORY.md": "la otra"}
+    )
+    _patch_client(monkeypatch, handler)
+
+    result = runner.invoke(
+        app,
+        [
+            "memory", "resolve", f"{_REAL_SLUG}/MEMORY.md", "--prefer-local",
+            "--gateway-url", "https://gw:7415", "--api-key", "a2a_test",
+            "--projects-root", str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert handler.pushed == [f"{_REAL_SLUG}/MEMORY.md"]  # type: ignore[attr-defined]
+
+
+def test_cli_forget_acepta_un_slug_real(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mismo caso que resolve: el rel_path arranca con guion."""
+    _isolate_env(tmp_path, monkeypatch)
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "partition": "claude-memory", "created": 0, "updated": 0,
+                "unchanged": 0, "deleted": 1, "errors": [],
+            },
+        )
+
+    _patch_client(monkeypatch, handler)
+    result = runner.invoke(
+        app,
+        [
+            "memory", "forget", f"{_REAL_SLUG}/vieja.md", "--yes",
+            "--gateway-url", "https://gw:7415", "--api-key", "a2a_test",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    body = seen["body"]
+    assert isinstance(body, dict)
+    assert body["delete_paths"] == [f"{_REAL_SLUG}/vieja.md"]
+
+
+def test_comandos_con_rel_path_no_declaran_flags_cortos() -> None:
+    """Ningún comando que reciba un rel_path puede tener alias cortos (`-y`, `-f`, …).
+
+    Los rel_path empiezan con '-' y click parsea ese token como un GRUPO de flags cortos,
+    consumiendo cada letra que coincida con uno declarado. Con `-y` en `forget`, el path
+    `-home-usuario-miproyecto/x.md` llegaba como `-home-usuario-miproecto/x.md`: corrupción
+    silenciosa que apunta a otro documento. Sin cortos declarados, el token entero cae al
+    argumento posicional.
+    """
+    from typer.main import get_command
+
+    grupo = get_command(app).commands["memory"]  # type: ignore[attr-defined]
+    for nombre in ("resolve", "forget"):
+        cmd = grupo.commands[nombre]  # type: ignore[attr-defined]
+        cortos = [
+            opt
+            for p in cmd.params
+            for opt in getattr(p, "opts", [])
+            if opt.startswith("-") and not opt.startswith("--")
+        ]
+        assert not cortos, f"'memory {nombre}' declara flags cortos {cortos}"
+
+
 def test_cli_resolve_exige_un_lado(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _isolate_env(tmp_path, monkeypatch)
     result = runner.invoke(
