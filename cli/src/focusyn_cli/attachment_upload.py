@@ -35,6 +35,20 @@ from focusyn_cli.contracts import AttachmentUploadOut, content_idempotency_key
 # Header de autenticación del gateway (mismo que el resto de la API por key).
 _AGENT_KEY_HEADER = "X-Agent-Key"
 
+# Subir un binario NO es una request más: el gateway lo transcribe con el OCR antes de responder, y
+# ese trabajo escala con las PÁGINAS del documento. Los 120 s que había acá (el default genérico de
+# ``http.py``) alcanzaban para ~24 páginas, así que **todo catálogo o manual cortaba**: medido el
+# 2026-08-13 sobre una ingesta real de PDFs escaneados, 12 de cada 200 archivos, y los 12 eran
+# catálogos y manuales. El corte no pierde el trabajo —el gateway termina igual y el reintento
+# sale por
+# ``already_uploaded``— pero deja la fila del censo en ``error`` y obliga a **re-descargar el
+# binario entero** (23 MB en uno de los casos) para cerrarla.
+#
+# 900 s lo alinea con ``SOURCE_INGEST_ITEM_TIMEOUT_S`` del gateway, que es el techo real de la
+# operación aguas arriba: pasado ese punto el que corta es el servidor, y esperar más acá sólo
+# agregaría un timeout invisible por encima del que sí decide. Cubre ~180 páginas a 5 s/página.
+_UPLOAD_TIMEOUT_S = 900.0
+
 
 class AttachmentUploadClient:
     """Cliente HTTP síncrono de ``POST /v1/write/attachment`` (streaming multipart).
@@ -50,7 +64,7 @@ class AttachmentUploadClient:
         gateway_url: str,
         api_key: str,
         *,
-        timeout: float = 120.0,
+        timeout: float = _UPLOAD_TIMEOUT_S,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self._client = httpx.Client(
