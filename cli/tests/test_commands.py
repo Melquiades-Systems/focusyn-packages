@@ -239,3 +239,103 @@ def test_agent_rotate(gateway: dict[str, object]) -> None:
     assert result.exit_code == 0, result.output
     assert "a2a_ROT" in result.output
     assert gateway["requests"][-1].url.path == "/v1/agents/l/rotate"  # type: ignore[index]
+
+
+# --------------------------------------------------------------------------- #
+# credential set-role / assign-vault — los dos payloads que el gateway ignoraba #
+# --------------------------------------------------------------------------- #
+# Los dos comandos mandaban un campo con el nombre equivocado (`llm_role` en vez de `role`,
+# `credential_label` en vez de `credential_id`). El gateway ignora los campos extra, así que el
+# cuerpo se leía como "campo ausente" y ambos endpoints ejecutaban su rama de QUITAR: uno dejaba
+# la credencial sin rol y el otro dejaba el vault sin PAT, los dos respondiendo 200 y el CLI
+# felicitando. Un test que sólo mire el exit code no ve nada: hay que mirar el CUERPO enviado.
+
+
+def _cuerpo(gateway: dict[str, Any], idx: int = -1) -> Any:
+    import json as _j
+
+    return _j.loads(gateway["requests"][idx].content)
+
+
+def test_set_role_manda_el_campo_que_el_gateway_lee(gateway: dict[str, Any]) -> None:
+    _set(gateway, lambda r: httpx.Response(200, json={"id": "c1", "llm_role": "judge"}))
+    res = runner.invoke(app, ["credential", "set-role", "c1", "--role", "judge"])
+    assert res.exit_code == 0, res.output
+    assert _cuerpo(gateway) == {"role": "judge"}, "el campo es `role`; `llm_role` se ignora"
+
+
+def test_set_role_none_viaja_como_null_no_como_el_string(gateway: dict[str, Any]) -> None:
+    """`none` es el alias de "quitá el rol". Mandarlo tal cual da 422 contra el Literal."""
+    _set(gateway, lambda r: httpx.Response(200, json={"id": "c1", "llm_role": None}))
+    res = runner.invoke(app, ["credential", "set-role", "c1", "--role", "none"])
+    assert res.exit_code == 0, res.output
+    assert _cuerpo(gateway) == {"role": None}
+
+
+def test_set_role_rechaza_un_rol_inventado_sin_llamar_al_gateway(gateway: dict[str, Any]) -> None:
+    """Validar acá importa porque el 422 remoto no dice cuáles son los válidos."""
+    _set(gateway, lambda r: httpx.Response(200, json={}))
+    res = runner.invoke(app, ["credential", "set-role", "c1", "--role", "arbitro"])
+    assert res.exit_code == 2
+    assert gateway["requests"] == [], "no se llama al gateway con un rol que ya sabemos inválido"
+
+
+def test_set_role_acepta_los_cuatro_roles(gateway: dict[str, Any]) -> None:
+    for rol in ("primary", "secondary", "judge", "judge_secondary"):
+        _set(gateway, lambda r: httpx.Response(200, json={"id": "c1"}))
+        res = runner.invoke(app, ["credential", "set-role", "c1", "--role", rol])
+        assert res.exit_code == 0, f"{rol}: {res.output}"
+        assert _cuerpo(gateway) == {"role": rol}
+
+
+def test_assign_vault_resuelve_el_label_a_id(gateway: dict[str, Any]) -> None:
+    """El endpoint identifica por id; el label se resuelve contra `GET /v1/credentials`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/credentials":
+            return httpx.Response(
+                200,
+                json={
+                    "credentials": [
+                        {"id": "no-es", "label": "otro", "kind": "git_pat"},
+                        {"id": "cred-123", "label": "mrgenkko", "kind": "git_pat"},
+                        {"id": "llm", "label": "mrgenkko", "kind": "llm_api_key"},
+                    ]
+                },
+            )
+        return httpx.Response(200, json={"name": "wiki"})
+
+    _set(gateway, handler)
+    res = runner.invoke(
+        app, ["credential", "assign-vault", "wiki", "--credential-label", "mrgenkko"]
+    )
+    assert res.exit_code == 0, res.output
+    assert _cuerpo(gateway) == {"credential_id": "cred-123"}, (
+        "resuelve al git_pat homónimo, no a la llave de LLM con el mismo label"
+    )
+
+
+def test_assign_vault_con_label_inexistente_no_desasocia(gateway: dict[str, Any]) -> None:
+    """El modo de falla que el bug producía: seguir adelante deja el vault SIN credencial.
+
+    Un vault sin PAT queda inerte (no hace fetch ni push) y el comando decía "✓". Por eso el
+    label que no resuelve corta ANTES del PUT."""
+    _set(gateway, lambda r: httpx.Response(200, json={"credentials": []}))
+    res = runner.invoke(
+        app, ["credential", "assign-vault", "wiki", "--credential-label", "no-existe"]
+    )
+    assert res.exit_code == 2
+    assert [r.url.path for r in gateway["requests"]] == ["/v1/credentials"], (
+        "no debe llegar a hacer el PUT: hacerlo desasociaría la credencial"
+    )
+
+
+def test_assign_vault_none_desasocia_explicitamente(gateway: dict[str, Any]) -> None:
+    """Desasociar sigue siendo posible, pero pidiéndolo — no como efecto de un error."""
+    _set(gateway, lambda r: httpx.Response(200, json={"name": "wiki"}))
+    res = runner.invoke(app, ["credential", "assign-vault", "wiki", "--credential-label", "none"])
+    assert res.exit_code == 0, res.output
+    assert _cuerpo(gateway) == {"credential_id": None}
+    assert [r.url.path for r in gateway["requests"]] == ["/v1/vaults/wiki/credential"], (
+        "desasociar no necesita listar credenciales"
+    )

@@ -242,40 +242,96 @@ def credential_delete(
     typer.secho(f"✓ credencial {credential_id} borrada", fg=typer.colors.GREEN)
 
 
+#: Roles del eje LLM que acepta el gateway. Los dos primeros eligen quién RESPONDE; los dos
+#: últimos, quién EVALÚA lo respondido. Una credencial toma UNO solo: marcarle un rol nuevo le
+#: quita el anterior, y por eso el juez nunca puede ser además el generador.
+_LLM_ROLES = ("primary", "secondary", "judge", "judge_secondary")
+#: Alias que el usuario escribe para QUITAR el rol. Viajan como ``null``, no como el string.
+_ROLE_NINGUNO = ("none", "null", "-")
+
+
 @credential_app.command("set-role")
 def credential_set_role(
     credential_id: Annotated[str, typer.Argument()],
-    role: Annotated[str, typer.Option("--role", help="primary | secondary | none")],
+    role: Annotated[
+        str,
+        typer.Option("--role", help="primary | secondary | judge | judge_secondary | none"),
+    ],
     profile: _Profile = None,
     gateway_url: _Url = None,
     api_key: _Key = None,
 ) -> None:
-    """Fija el rol LLM de una credencial (scope credential)."""
+    """Fija el rol LLM de una credencial (scope credential).
+
+    ``judge``/``judge_secondary`` son el eje del JUEZ, que mide la fidelidad de lo que generó el
+    otro eje. Sin rol ``judge`` no se juzga: no cae al primario, porque sería el generador
+    evaluándose a sí mismo.
+    """
+    if role.lower() in _ROLE_NINGUNO:
+        payload: dict[str, str | None] = {"role": None}
+    elif role.lower() in _LLM_ROLES:
+        payload = {"role": role.lower()}
+    else:
+        # Se valida ACÁ y no sólo en el gateway porque el 422 remoto no dice cuáles son los
+        # válidos, y este comando ya tenía un modo de falla silencioso: ver el aviso de abajo.
+        esperado = " | ".join((*_LLM_ROLES, "none"))
+        typer.secho(
+            f"✗ rol inválido: {role!r} (esperado {esperado})", fg=typer.colors.RED, err=True
+        )
+        raise typer.Exit(code=2)
     _run(
-        lambda c: c.put(f"/v1/credentials/{credential_id}/llm-role", json={"llm_role": role}),
+        lambda c: c.put(f"/v1/credentials/{credential_id}/llm-role", json=payload),
         profile,
         gateway_url,
         api_key,
     )
-    typer.secho(f"✓ rol de {credential_id} → {role}", fg=typer.colors.GREEN)
+    destino = "sin rol" if payload["role"] is None else payload["role"]
+    typer.secho(f"✓ rol de {credential_id} → {destino}", fg=typer.colors.GREEN)
 
 
 @credential_app.command("assign-vault")
 def credential_assign_vault(
     vault: Annotated[str, typer.Argument(help="Nombre del vault.")],
-    label: Annotated[str, typer.Option("--credential-label")],
+    label: Annotated[
+        str,
+        typer.Option(
+            "--credential-label", help="Label de la credencial, o 'none' para desasociar."
+        ),
+    ],
     profile: _Profile = None,
     gateway_url: _Url = None,
     api_key: _Key = None,
 ) -> None:
-    """Asigna una credencial Git a un vault (scope vault)."""
-    _run(
-        lambda c: c.put(f"/v1/vaults/{vault}/credential", json={"credential_label": label}),
-        profile,
-        gateway_url,
-        api_key,
-    )
-    typer.secho(f"✓ vault '{vault}' → credencial '{label}'", fg=typer.colors.GREEN)
+    """Asigna una credencial Git a un vault (scope vault).
+
+    El gateway identifica la credencial por **id**, así que el label se resuelve acá contra
+    ``GET /v1/credentials``. Un label que no existe se rechaza ANTES de llamar al PUT: mandarlo
+    igual desasociaría la credencial del vault, que es lo contrario de lo que se pidió.
+    """
+    quitar = label.lower() in _ROLE_NINGUNO
+
+    def _asignar(c: GatewayClient) -> Any:
+        credential_id: str | None = None
+        if not quitar:
+            out = c.get("/v1/credentials")
+            creds = out.get("credentials", out) if isinstance(out, dict) else out
+            match = [
+                cr
+                for cr in (creds if isinstance(creds, list) else [])
+                if cr.get("label") == label and cr.get("kind") == "git_pat"
+            ]
+            if not match:
+                raise CliError(
+                    f"no existe una credencial git_pat con label '{label}' "
+                    f"(mirá `focusyn credential list`)",
+                    code=2,
+                )
+            credential_id = str(match[0].get("id"))
+        return c.put(f"/v1/vaults/{vault}/credential", json={"credential_id": credential_id})
+
+    _run(_asignar, profile, gateway_url, api_key)
+    destino = "desasociada" if quitar else f"credencial '{label}'"
+    typer.secho(f"✓ vault '{vault}' → {destino}", fg=typer.colors.GREEN)
 
 
 # --------------------------------------------------------------------------- org / tenant
