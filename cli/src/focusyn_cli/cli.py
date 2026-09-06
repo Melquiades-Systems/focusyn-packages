@@ -34,6 +34,7 @@ from focusyn_cli import mcp as mcp_mod
 from focusyn_cli.attachment_upload import AttachmentUploadClient
 from focusyn_cli.cmd_admin import (
     agent_app,
+    config_app,
     credential_app,
     org_app,
     tenant_app,
@@ -81,6 +82,7 @@ app.add_typer(hooks_app, name="hooks")
 app.add_typer(mcp_app, name="mcp")
 # Administración por HTTP (Fase 2). El gateway autoriza por scopes (403 si no alcanza).
 app.add_typer(vault_app, name="vault")
+app.add_typer(config_app, name="config")
 app.add_typer(credential_app, name="credential")
 app.add_typer(org_app, name="org")
 app.add_typer(tenant_app, name="tenant")

@@ -112,6 +112,9 @@ class GatewayClient:
     def put(self, path: str, json: Any = None) -> Any:
         return self._send("PUT", path, json=json)
 
+    def patch(self, path: str, json: Any = None) -> Any:
+        return self._send("PATCH", path, json=json)
+
     def delete(self, path: str) -> Any:
         return self._send("DELETE", path)
 

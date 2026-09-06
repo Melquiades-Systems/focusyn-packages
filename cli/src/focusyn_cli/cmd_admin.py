@@ -19,6 +19,7 @@ from focusyn_cli.http import CliError, GatewayClient
 from focusyn_cli.scaffold import scaffold_vault
 
 vault_app = typer.Typer(help="Vaults por HTTP (scope vault/read): create/list/config/scaffold.")
+config_app = typer.Typer(help="Perfil GLOBAL del pipeline del tenant (scope read/admin).")
 credential_app = typer.Typer(help="Credenciales cifradas por HTTP (scope credential).")
 org_app = typer.Typer(help="Organizaciones (scope admin).")
 tenant_app = typer.Typer(help="Aprovisionamiento de tenants (scope admin).")
@@ -47,6 +48,84 @@ def _run(
 
 def _dump(data: Any) -> None:
     typer.echo(_json.dumps(data, indent=2, ensure_ascii=False))
+
+
+def _coerce(valor: str) -> Any:
+    """Convierte el valor de la línea de comandos al tipo que el gateway espera.
+
+    Una shell entrega todo como texto, y el gateway valida con pydantic: mandar ``"true"`` donde va
+    un bool da 422. El orden importa — ``true``/``false`` antes que el número, y el número antes
+    que el texto—, y ``null`` existe para poder distinguir "poné null" de la cadena "null".
+
+    Lo que no encaje en ninguno viaja como texto, y una lista se escribe con ``--json``: adivinar
+    listas desde comas rompería cualquier valor que legítimamente lleve una.
+    """
+    bajo = valor.strip().lower()
+    if bajo in ("true", "false"):
+        return bajo == "true"
+    if bajo == "null":
+        return None
+    try:
+        return int(valor)
+    except ValueError:
+        pass
+    try:
+        return float(valor)
+    except ValueError:
+        return valor
+
+
+def _set_path(raiz: dict[str, Any], clave: str, valor: Any) -> None:
+    """Escribe ``clave`` (dotted, p. ej. ``groundedness.sample_rate``) dentro de ``raiz``."""
+    partes = clave.split(".")
+    nodo = raiz
+    for parte in partes[:-1]:
+        hijo = nodo.get(parte)
+        if not isinstance(hijo, dict):
+            hijo = {}
+            nodo[parte] = hijo
+        nodo = hijo
+    nodo[partes[-1]] = valor
+
+
+def _unset_path(raiz: dict[str, Any], clave: str) -> None:
+    """Borra ``clave`` y poda los submodelos que queden vacíos.
+
+    Podar no es cosmético: un ``{"groundedness": {}}`` es no-op para el gateway, pero deja el
+    override persistido diciendo que hay algo configurado ahí. El panel lo mostraría como tocado.
+    """
+    partes = clave.split(".")
+    cadena: list[tuple[dict[str, Any], str]] = []
+    nodo = raiz
+    for parte in partes[:-1]:
+        hijo = nodo.get(parte)
+        if not isinstance(hijo, dict):
+            return
+        cadena.append((nodo, parte))
+        nodo = hijo
+    nodo.pop(partes[-1], None)
+    for padre, parte in reversed(cadena):
+        if not padre.get(parte):
+            padre.pop(parte, None)
+
+
+def _editar_override(
+    actual: dict[str, Any] | None, clave: str, valor: str | None, *, unset: bool, como_json: bool
+) -> dict[str, Any]:
+    """El override completo que hay que mandar: se LEE, se muta y se manda entero.
+
+    ⚠️ El ``PATCH`` de config **reemplaza el override entero**, no lo mergea. Mandar sólo la clave
+    tocada borraría en silencio todo lo demás que el vault tuviera configurado — que es el modo de
+    falla que este rodeo (GET → mutar → PATCH) existe para evitar.
+    """
+    override: dict[str, Any] = dict(actual or {})
+    if unset:
+        _unset_path(override, clave)
+        return override
+    if valor is None:
+        raise CliError("Falta el VALOR (o usá --unset para quitar la clave).", code=2)
+    _set_path(override, clave, _json.loads(valor) if como_json else _coerce(valor))
+    return override
 
 
 # --------------------------------------------------------------------------- vault
@@ -126,6 +205,48 @@ def vault_config(
     _dump(out)
 
 
+@vault_app.command("config-set")
+def vault_config_set(
+    name: Annotated[str, typer.Argument(help="Nombre del vault.")],
+    clave: Annotated[
+        str,
+        typer.Argument(
+            help="Clave en notación de punto, p. ej. `groundedness.sample_rate` o "
+            "`retrieval.top_k_vector`."
+        ),
+    ],
+    valor: Annotated[
+        str | None, typer.Argument(help="Valor. Se omite con --unset.")
+    ] = None,
+    unset: Annotated[
+        bool, typer.Option("--unset", help="Quita la clave (vuelve al default heredado).")
+    ] = False,
+    como_json: Annotated[
+        bool, typer.Option("--json", help="Interpreta VALOR como JSON (listas, objetos).")
+    ] = False,
+    profile: _Profile = None,
+    gateway_url: _Url = None,
+    api_key: _Key = None,
+) -> None:
+    """Cambia UNA clave de la config del vault, conservando el resto (scope vault).
+
+    Lee el override actual, lo muta y lo manda entero: el `PATCH` REEMPLAZA el override, así que
+    mandar sólo la clave tocada borraría todo lo demás.
+    """
+
+    def _op(c: GatewayClient) -> Any:
+        actual = c.get(f"/v1/vaults/{name}/config")
+        override = _editar_override(
+            actual.get("override"), clave, valor, unset=unset, como_json=como_json
+        )
+        return c.patch(f"/v1/vaults/{name}/config", json=override)
+
+    out = _run(_op, profile, gateway_url, api_key)
+    destino = "quitada" if unset else f"= {valor}"
+    typer.secho(f"✓ {name}: {clave} {destino}", fg=typer.colors.GREEN)
+    _dump(out.get("effective", out))
+
+
 @vault_app.command("scaffold")
 def vault_scaffold(
     name: Annotated[str, typer.Argument(help="Nombre del vault dossier a scaffoldear.")],
@@ -149,6 +270,54 @@ def vault_scaffold(
     )
     for did in out.get("doc_ids", []):
         typer.echo(f"  {did}")
+
+
+# --------------------------------------------------------------------------- config global
+
+
+@config_app.command("show")
+def config_show(
+    profile: _Profile = None,
+    gateway_url: _Url = None,
+    api_key: _Key = None,
+) -> None:
+    """Muestra el perfil global del pipeline: override, efectivo y default de fábrica."""
+    out = _run(lambda c: c.get("/v1/config"), profile, gateway_url, api_key)
+    _dump(out)
+
+
+@config_app.command("set")
+def config_set(
+    clave: Annotated[
+        str,
+        typer.Argument(help="Clave en notación de punto, p. ej. `groundedness.sample_rate`."),
+    ],
+    valor: Annotated[str | None, typer.Argument(help="Valor. Se omite con --unset.")] = None,
+    unset: Annotated[bool, typer.Option("--unset", help="Quita la clave.")] = False,
+    como_json: Annotated[
+        bool, typer.Option("--json", help="Interpreta VALOR como JSON (listas, objetos).")
+    ] = False,
+    profile: _Profile = None,
+    gateway_url: _Url = None,
+    api_key: _Key = None,
+) -> None:
+    """Cambia UNA clave del perfil global, conservando el resto (scope admin).
+
+    El perfil global sólo admite un subconjunto (scope/tuning): lo estructural va por env de fábrica
+    o por vault. Una clave fuera de ese subconjunto la rechaza el gateway con 422 y te dice cuál.
+    """
+
+    def _op(c: GatewayClient) -> Any:
+        actual = c.get("/v1/config")
+        override = _editar_override(
+            actual.get("override"), clave, valor, unset=unset, como_json=como_json
+        )
+        return c.patch("/v1/config", json=override)
+
+    out = _run(_op, profile, gateway_url, api_key)
+    destino = "quitada" if unset else f"= {valor}"
+    typer.secho(f"✓ global: {clave} {destino}", fg=typer.colors.GREEN)
+    _dump(out.get("effective", out))
 
 
 # --------------------------------------------------------------------------- credential
