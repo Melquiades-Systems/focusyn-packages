@@ -1,6 +1,7 @@
 """Comandos de ADMINISTRACIÓN por HTTP (gated por scopes vault/credential/admin del gateway).
 
-vault (create/list/config/scaffold) · credential (list/create/rotate/delete/set-role/assign) ·
+vault (create/list/config/scaffold) · credential (list/create/rotate/set-expiry/delete/set-role/
+assign) ·
 org create · tenant provision · usage (summary/list). El gateway autoriza: un usuario sin el scope
 recibe 403 limpio. Los comandos de identidad de USUARIOS (crear/desactivar) NO están acá — quedan en
 el operador ``focusynctl`` (Postgres), que es lo que el IdP absorberá (MEL-DEC-193).
@@ -9,7 +10,9 @@ el operador ``focusynctl`` (Postgres), que es lo que el IdP absorberá (MEL-DEC-
 from __future__ import annotations
 
 import json as _json
+import sys
 from collections.abc import Callable
+from datetime import UTC, date, datetime
 from typing import Annotated, Any
 
 import typer
@@ -215,9 +218,7 @@ def vault_config_set(
             "`retrieval.top_k_vector`."
         ),
     ],
-    valor: Annotated[
-        str | None, typer.Argument(help="Valor. Se omite con --unset.")
-    ] = None,
+    valor: Annotated[str | None, typer.Argument(help="Valor. Se omite con --unset.")] = None,
     unset: Annotated[
         bool, typer.Option("--unset", help="Quita la clave (vuelve al default heredado).")
     ] = False,
@@ -323,6 +324,135 @@ def config_set(
 # --------------------------------------------------------------------------- credential
 
 
+_NUNCA = {"nunca", "never", "no vence"}
+_DESCONOCIDO = {"desconocido", "unknown", "no sé", "no se", "?"}
+_EXPIRES_HELP = (
+    "Cuándo VENCE el secreto: YYYY-MM-DD, 'nunca' o 'desconocido'. Sin esto se pregunta (y sin "
+    "terminal queda 'desconocido', con aviso)."
+)
+
+
+def _parse_vencimiento(texto: str, *, permitir_pasada: bool) -> dict[str, str | bool | None]:
+    """El vencimiento como lo espera el gateway, desde lo que escribió el usuario.
+
+    Una sola opción con tres respuestas —y no tres flags— para que no haya combinación
+    contradictoria. ``ValueError`` si no se entiende; también si la fecha ya pasó y el secreto es
+    NUEVO (el gateway lo rechazaría con 422, después de que el usuario pegó el secreto).
+    """
+    t = texto.strip().lower()
+    if t in _NUNCA:
+        return {"secret_expires_at": None, "secret_never_expires": True}
+    if t in _DESCONOCIDO:
+        return {"secret_expires_at": None, "secret_never_expires": False}
+    try:
+        fecha = date.fromisoformat(t)
+    except ValueError as exc:
+        raise ValueError(
+            f"no entiendo {texto!r}: va YYYY-MM-DD (p. ej. 2027-04-30), 'nunca' o 'desconocido'"
+        ) from exc
+    # El día del gateway es UTC: con el local, de noche en Colombia se aceptaría una fecha que el
+    # gateway ya considera vencida.
+    if not permitir_pasada and fecha <= datetime.now(tz=UTC).date():
+        raise ValueError(f"{fecha.isoformat()} ya pasó: un secreto nuevo no puede estar vencido")
+    return {"secret_expires_at": fecha.isoformat(), "secret_never_expires": False}
+
+
+def _validar_nuevo(value: str | None) -> str | None:
+    """Callback de ``--expires`` en create/rotate: corre ANTES del prompt del secreto, así un typo
+    en la fecha no cuesta el secreto ya pegado."""
+    if value is not None:
+        try:
+            _parse_vencimiento(value, permitir_pasada=False)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+    return value
+
+
+def _validar_cualquiera(value: str | None) -> str | None:
+    """Callback de ``--expires`` en set-expiry: el secreto guardado sí puede estar vencido."""
+    if value is not None:
+        try:
+            _parse_vencimiento(value, permitir_pasada=True)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+    return value
+
+
+_ExpiresNuevo = Annotated[
+    str | None, typer.Option("--expires", help=_EXPIRES_HELP, callback=_validar_nuevo)
+]
+_ExpiresGuardado = Annotated[
+    str | None, typer.Option("--expires", help=_EXPIRES_HELP, callback=_validar_cualquiera)
+]
+
+
+def _hay_terminal() -> bool:
+    """¿Hay alguien que conteste un prompt? (Aparte para poder fijarlo en los tests.)"""
+    return sys.stdin.isatty()
+
+
+def _vencimiento(expires: str | None, *, permitir_pasada: bool) -> dict[str, str | bool | None]:
+    """El vencimiento del secreto: el de ``--expires`` o, si no vino, preguntado.
+
+    Se PIDE siempre que no venga: el client secret de Entra y el PAT que se cayeron sin aviso
+    tenían su fecha al crearlos y nadie la guardó. Una respuesta que no se entiende se vuelve a
+    preguntar (el secreto ya está pegado). Sin terminal —el secreto por tubería, un script— no hay a
+    quién preguntarle: queda desconocido y se avisa por stderr, en vez de abortar un comando que
+    antes funcionaba.
+    """
+    if expires is not None:
+        return _parse_vencimiento(expires, permitir_pasada=permitir_pasada)
+    if not _hay_terminal():
+        typer.secho(
+            "⚠ sin --expires y sin terminal: el vencimiento queda DESCONOCIDO",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
+        return {"secret_expires_at": None, "secret_never_expires": False}
+    while True:
+        resp = typer.prompt("¿Cuándo vence el secreto? (YYYY-MM-DD, 'nunca' o 'desconocido')")
+        try:
+            return _parse_vencimiento(resp, permitir_pasada=permitir_pasada)
+        except ValueError as exc:
+            typer.secho(f"✗ {exc}", fg=typer.colors.RED, err=True)
+
+
+def _vence_legible(cr: dict[str, Any]) -> str:
+    """El vencimiento que calculó el gateway, en una columna.
+
+    Sin ``secret_expiry_status`` en la respuesta el gateway es anterior a la fecha de vencimiento
+    (sin desplegar, o viejo): se dice así y no «DESCONOCIDO», que significa otra cosa —que nadie la
+    declaró— y escondería que la fecha que se acaba de mandar no se guardó.
+    """
+    if "secret_expiry_status" not in cr:
+        return "N/D (el gateway no informa vencimientos)"
+    estado = cr.get("secret_expiry_status") or "unknown"
+    fecha = cr.get("secret_expires_at") or ""
+    dias = cr.get("secret_days_left")
+    if estado == "never":
+        return "no vence"
+    if estado == "unknown":
+        return "DESCONOCIDO"
+    if estado == "expired":
+        return f"{fecha} VENCIDO"
+    return f"{fecha} ({dias} d)" if estado in ("warning", "critical") else fecha
+
+
+def _eco_vencimiento(out: Any, enviado: dict[str, str | bool | None]) -> None:
+    """Muestra lo que el gateway GUARDÓ, y avisa si no guardó lo que se mandó."""
+    if not isinstance(out, dict):
+        return
+    typer.echo(f"  vence: {_vence_legible(out)}")
+    declarado = enviado.get("secret_expires_at") or enviado.get("secret_never_expires")
+    if declarado and "secret_expiry_status" not in out:
+        typer.secho(
+            "⚠ el gateway ignoró el vencimiento (es anterior a la migración 0026): no quedó "
+            "guardado. Volvé a declararlo con `focusyn credential set-expiry` cuando se actualice.",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
+
+
 @credential_app.command("list")
 def credential_list(
     owner: Annotated[str | None, typer.Option("--owner", help="Admin: filtra por owner.")] = None,
@@ -340,7 +470,7 @@ def credential_list(
     for cr in creds if isinstance(creds, list) else []:
         typer.echo(
             f"{cr.get('label', '?'):<20} {cr.get('kind', ''):<14} {cr.get('provider') or '-':<10} "
-            f"{cr.get('llm_role') or ''}"
+            f"{cr.get('llm_role') or '-':<10} {_vence_legible(cr)}"
         )
 
 
@@ -359,18 +489,24 @@ def credential_create(
     ],
     provider: Annotated[str | None, typer.Option("--provider")] = None,
     scope: Annotated[str | None, typer.Option("--scope", help="company (admin) | user")] = None,
+    expires: _ExpiresNuevo = None,
     profile: _Profile = None,
     gateway_url: _Url = None,
     api_key: _Key = None,
 ) -> None:
-    """Crea una credencial cifrada (scope credential; company exige admin)."""
-    body: dict[str, Any] = {"label": label, "kind": kind, "secret": secret}
+    """Crea una credencial cifrada (scope credential; company exige admin).
+
+    Junto al secreto va su vencimiento: con él, el panel de Credenciales avisa 30 y 7 días antes.
+    """
+    vence = _vencimiento(expires, permitir_pasada=False)
+    body: dict[str, Any] = {"label": label, "kind": kind, "secret": secret, **vence}
     if provider:
         body["provider"] = provider
     if scope:
         body["scope"] = scope
     out = _run(lambda c: c.post("/v1/credentials", json=body), profile, gateway_url, api_key)
     typer.secho(f"✓ credencial '{label}' creada (id {out.get('id', '?')})", fg=typer.colors.GREEN)
+    _eco_vencimiento(out, vence)
 
 
 @credential_app.command("rotate")
@@ -385,18 +521,52 @@ def credential_rotate(
             help="Sin el flag se pide OCULTO (recomendado): inline queda en el historial.",
         ),
     ],
+    expires: _ExpiresNuevo = None,
     profile: _Profile = None,
     gateway_url: _Url = None,
     api_key: _Key = None,
 ) -> None:
-    """Rota el secreto de una credencial (scope credential)."""
-    _run(
-        lambda c: c.post(f"/v1/credentials/{credential_id}/rotate", json={"secret": secret}),
+    """Reemplaza el secreto de una credencial (scope credential), con su vencimiento.
+
+    Conserva el id y el resto de la credencial (el client/tenant id de un origen externo). El
+    vencimiento es del secreto NUEVO: sin declararlo, la credencial queda «desconocido» en vez de
+    heredar la fecha del que se reemplaza. Para un client secret de Entra va el **Value**, no el
+    Secret ID.
+    """
+    vence = _vencimiento(expires, permitir_pasada=False)
+    body = {"secret": secret, **vence}
+    out = _run(
+        lambda c: c.post(f"/v1/credentials/{credential_id}/rotate", json=body),
         profile,
         gateway_url,
         api_key,
     )
     typer.secho(f"✓ credencial {credential_id} rotada", fg=typer.colors.GREEN)
+    _eco_vencimiento(out, vence)
+
+
+@credential_app.command("set-expiry")
+def credential_set_expiry(
+    credential_id: Annotated[str, typer.Argument()],
+    expires: _ExpiresGuardado = None,
+    profile: _Profile = None,
+    gateway_url: _Url = None,
+    api_key: _Key = None,
+) -> None:
+    """Declara cuándo vence el secreto que YA está guardado, sin reemplazarlo (scope credential).
+
+    Para las credenciales anteriores a la fecha de vencimiento. Acepta una fecha pasada: el
+    secreto guardado puede estar vencido, y decirlo es justamente el punto.
+    """
+    body = _vencimiento(expires, permitir_pasada=True)
+    out = _run(
+        lambda c: c.put(f"/v1/credentials/{credential_id}/secret-expiry", json=body),
+        profile,
+        gateway_url,
+        api_key,
+    )
+    typer.secho(f"✓ vencimiento de {credential_id} declarado", fg=typer.colors.GREEN)
+    _eco_vencimiento(out, body)
 
 
 @credential_app.command("delete")

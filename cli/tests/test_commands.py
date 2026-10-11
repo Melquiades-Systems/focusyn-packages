@@ -339,3 +339,161 @@ def test_assign_vault_none_desasocia_explicitamente(gateway: dict[str, Any]) -> 
     assert [r.url.path for r in gateway["requests"]] == ["/v1/vaults/wiki/credential"], (
         "desasociar no necesita listar credenciales"
     )
+
+
+# --------------------------------------------------------------------------- #
+# credential create / rotate / set-expiry — el vencimiento del secreto          #
+# --------------------------------------------------------------------------- #
+# El client secret de un cliente venció en Azure y se supo semanas después, por un error a mitad
+# de una validación: la fecha existía al crearlo y no se guardó. Se pide junto al secreto, con UNA
+# opción (`--expires YYYY-MM-DD|nunca|desconocido`), validada antes de pedir el secreto.
+
+_FUTURA = "2099-04-30"
+_RESPUESTA_OK = {"secret_expiry_status": "ok", "secret_expires_at": _FUTURA}
+
+
+def test_rotate_manda_el_vencimiento(gateway: dict[str, Any]) -> None:
+    _set(gateway, lambda r: httpx.Response(200, json=_RESPUESTA_OK))
+    res = runner.invoke(
+        app, ["credential", "rotate", "c1", "--secret", "nuevo", "--expires", _FUTURA]
+    )
+    assert res.exit_code == 0, res.output
+    assert _cuerpo(gateway) == {
+        "secret": "nuevo",
+        "secret_expires_at": _FUTURA,
+        "secret_never_expires": False,
+    }
+    assert f"vence: {_FUTURA}" in res.output
+
+
+@pytest.mark.parametrize(
+    ("valor", "esperado"),
+    [
+        ("nunca", {"secret_expires_at": None, "secret_never_expires": True}),
+        ("desconocido", {"secret_expires_at": None, "secret_never_expires": False}),
+    ],
+)
+def test_rotate_acepta_nunca_y_desconocido(
+    gateway: dict[str, Any], valor: str, esperado: dict[str, Any]
+) -> None:
+    _set(gateway, lambda r: httpx.Response(200, json={"secret_expiry_status": "unknown"}))
+    res = runner.invoke(app, ["credential", "rotate", "c1", "--secret", "x", "--expires", valor])
+    assert res.exit_code == 0, res.output
+    assert {k: v for k, v in _cuerpo(gateway).items() if k != "secret"} == esperado
+
+
+def test_una_fecha_mal_escrita_falla_ANTES_de_pedir_el_secreto(gateway: dict[str, Any]) -> None:
+    """Sin `--secret` el CLI lo pide oculto. Con `--expires` inválido no se llega a pedirlo: un
+    typo en la fecha no le cuesta al usuario el secreto que ya había pegado."""
+    _set(gateway, lambda r: httpx.Response(200, json={}))
+    res = runner.invoke(app, ["credential", "rotate", "c1", "--expires", "30/04/2027"])
+    assert res.exit_code == 2
+    assert "Secret" not in res.output and "secret" not in res.output.lower().split("expires")[0]
+    assert gateway["requests"] == []
+
+
+def test_una_fecha_pasada_en_un_secreto_nuevo_se_rechaza_sin_llamar(
+    gateway: dict[str, Any],
+) -> None:
+    _set(gateway, lambda r: httpx.Response(200, json={}))
+    res = runner.invoke(
+        app, ["credential", "rotate", "c1", "--secret", "x", "--expires", "2020-01-01"]
+    )
+    assert res.exit_code == 2
+    assert gateway["requests"] == []
+
+
+def test_sin_terminal_no_se_cuelga_y_queda_desconocido(gateway: dict[str, Any]) -> None:
+    """`printf 'secreto\\n' | focusyn credential rotate c1` funcionaba antes: sigue funcionando,
+    con aviso, en vez de abortar en un prompt que nadie puede contestar."""
+    _set(gateway, lambda r: httpx.Response(200, json={"secret_expiry_status": "unknown"}))
+    res = runner.invoke(app, ["credential", "rotate", "c1"], input="secreto\n")
+    assert res.exit_code == 0, res.output
+    assert _cuerpo(gateway) == {
+        "secret": "secreto",
+        "secret_expires_at": None,
+        "secret_never_expires": False,
+    }
+    assert "DESCONOCIDO" in res.output
+
+
+def test_en_terminal_vuelve_a_preguntar_lo_que_no_entiende(
+    gateway: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("focusyn_cli.cmd_admin._hay_terminal", lambda: True)
+    _set(gateway, lambda r: httpx.Response(200, json=_RESPUESTA_OK))
+    res = runner.invoke(
+        app,
+        ["credential", "rotate", "c1", "--secret", "x"],
+        input=f"30/04/2027\n{_FUTURA}\n",
+    )
+    assert res.exit_code == 0, res.output
+    assert "no entiendo" in res.output
+    assert _cuerpo(gateway)["secret_expires_at"] == _FUTURA
+
+
+def test_create_muestra_lo_que_guardo_el_gateway(gateway: dict[str, Any]) -> None:
+    _set(gateway, lambda r: httpx.Response(201, json={"id": "n", **_RESPUESTA_OK}))
+    res = runner.invoke(
+        app,
+        ["credential", "create", "--label", "p", "--kind", "git_pat", "--secret", "g"]
+        + ["--expires", _FUTURA],
+    )
+    assert res.exit_code == 0, res.output
+    assert _cuerpo(gateway)["secret_expires_at"] == _FUTURA
+    assert f"vence: {_FUTURA}" in res.output
+
+
+def test_un_gateway_viejo_que_ignora_la_fecha_se_avisa(gateway: dict[str, Any]) -> None:
+    """Sin la migración 0026 el gateway ignora los campos y responde 201: el CLI no puede
+    felicitar como si la fecha hubiera quedado guardada."""
+    _set(gateway, lambda r: httpx.Response(201, json={"id": "n"}))
+    res = runner.invoke(
+        app,
+        ["credential", "create", "--label", "p", "--kind", "git_pat", "--secret", "g"]
+        + ["--expires", _FUTURA],
+    )
+    assert res.exit_code == 0, res.output
+    assert "ignoró el vencimiento" in res.output
+    assert "N/D" in res.output
+
+
+def test_set_expiry_acepta_una_fecha_pasada(gateway: dict[str, Any]) -> None:
+    _set(gateway, lambda r: httpx.Response(200, json={"secret_expiry_status": "expired"}))
+    res = runner.invoke(app, ["credential", "set-expiry", "c1", "--expires", "2026-09-15"])
+    assert res.exit_code == 0, res.output
+    assert gateway["requests"][-1].url.path == "/v1/credentials/c1/secret-expiry"
+    assert _cuerpo(gateway) == {"secret_expires_at": "2026-09-15", "secret_never_expires": False}
+
+
+def test_list_muestra_el_vencimiento(gateway: dict[str, Any]) -> None:
+    _set(
+        gateway,
+        lambda r: httpx.Response(
+            200,
+            json={
+                "credentials": [
+                    {
+                        "label": "gz",
+                        "kind": "external_source",
+                        "secret_expiry_status": "expired",
+                        "secret_expires_at": "2026-09-15",
+                        "secret_days_left": -26,
+                    },
+                    {
+                        "label": "pat",
+                        "kind": "git_pat",
+                        "secret_expiry_status": "critical",
+                        "secret_expires_at": "2026-10-16",
+                        "secret_days_left": 5,
+                    },
+                    {"label": "vieja", "kind": "git_pat", "secret_expiry_status": "unknown"},
+                ]
+            },
+        ),
+    )
+    res = runner.invoke(app, ["credential", "list"])
+    assert res.exit_code == 0, res.output
+    assert "2026-09-15 VENCIDO" in res.output
+    assert "2026-10-16 (5 d)" in res.output
+    assert "DESCONOCIDO" in res.output
