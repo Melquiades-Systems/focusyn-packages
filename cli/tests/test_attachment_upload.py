@@ -246,3 +246,27 @@ def test_cli_upload_invoca_cliente_y_muestra_markdown_ref(
     assert _CLI_UPLOADS == [("evidencia.png", "acme", "ACME-PEND-013")]
     # El markdown_ref se imprime (lo único que el agente pega en la nota).
     assert "![alt](/v1/attachment/" in result.stdout
+
+
+def test_cli_upload_muestra_los_avisos_del_gateway(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """El aviso va a stderr: stdout queda con el ``markdown_ref`` solo, para quien lo capture."""
+    aviso = "Sin `alt`: el `markdown_ref` dice «evidencia.png»."
+
+    class _ConAviso(_FakeClient):
+        def upload(self, file_path: Path, vault: str, **_kw: object) -> AttachmentUploadOut:
+            return AttachmentUploadOut.model_validate({**_ok_response(), "next_actions": [aviso]})
+
+    f = tmp_path / "evidencia.png"
+    f.write_bytes(b"\x89PNG")
+    monkeypatch.setattr("focusyn_cli.cli.AttachmentUploadClient", _ConAviso)
+
+    result = runner.invoke(
+        app,
+        ["attachment", "upload", "--file", str(f), "--vault", "acme"]
+        + ["--gateway-url", "https://gw:7415", "--api-key", "a2a_test"],
+    )
+    assert result.exit_code == 0, result.output
+    assert aviso in result.stderr
+    assert aviso not in result.stdout

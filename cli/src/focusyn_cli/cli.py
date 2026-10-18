@@ -1273,6 +1273,8 @@ def attachment_upload(
         fg=typer.colors.GREEN,
     )
     typer.echo(out.markdown_ref)
+    for aviso in out.next_actions:
+        typer.secho(f"⚠ {aviso}", fg=typer.colors.YELLOW, err=True)
 
 
 # --------------------------------------------------------------------------- #

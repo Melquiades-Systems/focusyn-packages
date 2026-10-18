@@ -68,6 +68,8 @@ class AttachmentUploadOut(BaseModel):
     content_hash: str
     markdown_ref: str = Field(description="![alt](/v1/attachment/{file_id}) listo para pegar")
     status: str = Field(description="uploaded | already_uploaded")
+    #: Avisos del gateway (p. ej. un alt que falta); un gateway viejo no los manda.
+    next_actions: list[str] = Field(default_factory=list)
 
 
 __all__ = [
