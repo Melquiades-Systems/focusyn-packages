@@ -13,6 +13,14 @@
       "version": "0.1.0",
       "category": "knowledge",
       "keywords": ["mcp", "vault", "graphrag", "memory"]
+    },
+    {
+      "name": "focusyn-feedback",
+      "source": "./mod-feedback",
+      "description": "👍/👎 por resultado bajo find_code y find_notes; el voto lo registra el CLI `focusyn feedback`. Sirve con el plugin focusyn o con `focusyn mcp install`.",
+      "version": "0.1.0",
+      "category": "knowledge",
+      "keywords": ["focusyn", "feedback", "search"]
     }
   ]
 }

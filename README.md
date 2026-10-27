@@ -7,6 +7,7 @@ el gateway de los vaults del ecosistema.
 |---|---|---|
 | [`cli/`](cli/) | **`focusyn`**, el CLI cliente (Python, HTTP puro) | `uv tool install "git+https://github.com/Melquiades-Systems/focusyn-packages#subdirectory=cli"` |
 | [`mcp/`](mcp/) | **plugin de Claude Code**: el MCP remoto + los hooks de memorias | `/plugin marketplace add Melquiades-Systems/focusyn-packages` → `/plugin install focusyn@melquiades` |
+| [`mod-feedback/`](mod-feedback/) | **mod de Claude Code**: 👍/👎 por resultado de `find_code`/`find_notes`, por el CLI | `/plugin install focusyn-feedback@melquiades` |
 
 ## Por qué existe este repo, y qué NO vive acá
 
@@ -48,7 +49,7 @@ De ahí la regla, que no es opcional:
 
 ```bash
 make install     # .venv en la raíz (workspace uv: los miembros comparten un lock)
-make check       # ruff + mypy strict + pytest + cli-check + plugin-check
+make check       # ruff + mypy strict + pytest + cli-check + plugin-check + mod-check
 ```
 
 > **El lock de este repo NO lo comparte el gateway** — a propósito. Cuando `focusyn-cli` era miembro del

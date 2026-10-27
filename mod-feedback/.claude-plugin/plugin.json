@@ -1,0 +1,10 @@
+{
+  "name": "focusyn-feedback",
+  "displayName": "Focusyn feedback",
+  "version": "0.1.0",
+  "description": "👍/👎 por resultado bajo find_code y find_notes del MCP focusyn; el voto lo registra el CLI `focusyn feedback`.",
+  "author": { "name": "Melquiades Systems", "url": "https://github.com/Melquiades-Systems" },
+  "repository": "https://github.com/Melquiades-Systems/focusyn-packages",
+  "keywords": ["focusyn", "feedback", "search"],
+  "types": "./types/index.d.ts"
+}

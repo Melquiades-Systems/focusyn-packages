@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
-.PHONY: help install lint fmt typecheck test check deadcode cli-check cli-install plugin-check
+.PHONY: help install lint fmt typecheck test check deadcode cli-check cli-install plugin-check mod-check
 
 help:  ## Lista los targets disponibles
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -21,7 +21,7 @@ typecheck:  ## mypy strict
 test:  ## pytest del CLI
 	uv run pytest cli/tests -q
 
-check: lint typecheck test cli-check plugin-check  ## todo lo anterior + los dos guards
+check: lint typecheck test cli-check plugin-check mod-check  ## todo lo anterior + los guards
 
 # Frontera de confianza como TEST: el wheel del cliente NO debe arrastrar ninguna dep del gateway.
 # Este guard vino del Makefile de focusyn cuando el CLI era miembro de aquel workspace; ahora que el
@@ -45,11 +45,20 @@ cli-check:  ## Verifica que el wheel del cliente sea delgado (sin deps del gatew
 # script sin permiso de ejecución sólo se descubre en la máquina del usuario, al instalar.
 plugin-check:  ## Valida los JSON del plugin/marketplace y que el hook sea ejecutable
 	@python3 -c "import json,sys; [json.load(open(f)) for f in sys.argv[1:]]; print('✓ JSON válido:', len(sys.argv)-1, 'archivos')" \
-	  mcp/.claude-plugin/plugin.json mcp/hooks/hooks.json .claude-plugin/marketplace.json
+	  mcp/.claude-plugin/plugin.json mcp/hooks/hooks.json .claude-plugin/marketplace.json \
+	  mod-feedback/.claude-plugin/plugin.json mod-feedback/hooks/hooks.json
 	@test -x mcp/scripts/memory-sync.sh \
 	  && echo "✓ hook ejecutable: mcp/scripts/memory-sync.sh" \
 	  || { echo "✗ mcp/scripts/memory-sync.sh no tiene bit de ejecución (chmod +x)"; exit 1; }
 	@bash -n mcp/scripts/memory-sync.sh && echo "✓ sintaxis del hook OK"
+
+# El mod lo valida y lo prueba el propio motor de Claude Code: sin `claude` no hay con qué.
+mod-check:  ## Valida y prueba el mod focusyn-feedback con `claude plugin validate|test`
+	@if ! command -v claude >/dev/null; then echo "⚠ mod-check SALTEADO: falta el CLI \`claude\`"; exit 0; fi; \
+	 out=$$(claude plugin validate mod-feedback 2>&1) || { echo "$$out"; exit 1; }; \
+	 echo "✓ mod-feedback valida"; \
+	 out=$$(claude plugin test mod-feedback 2>&1) || { echo "$$out"; exit 1; }; \
+	 echo "$$out" | tail -3
 
 deadcode:  ## Candidatos a dead code del propio CLI (reporte, no gate)
 	uv run focusyn deadcode
