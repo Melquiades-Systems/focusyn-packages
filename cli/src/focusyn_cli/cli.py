@@ -1457,6 +1457,7 @@ LEER
 ESCRIBIR
   propose → apply                        proponer y commitear (el gateway es el único escritor)
   delete · link                          borrar · enlazar dos documentos
+  feedback <query_id> up|down --rank N   votar un hit de find_code/find_notes
 
 ADMINISTRAR (403 limpio si te falta el scope)
   vault · credential · agent · org · tenant · usage

@@ -1,14 +1,16 @@
-"""Comandos de ESCRITURA del vault por HTTP: propose/apply/delete/link (scope propose/apply).
+"""Comandos de ESCRITURA por HTTP: propose/apply/delete/link/feedback (scope propose/apply).
 
-Solapa con las tools del MCP (que los agentes usan desde Claude Code) — su valor acá es para scripts
-y CI. Los ``request_id``/``idempotency_key`` se generan solos; ``source_agent`` es metadata.
+Los ``request_id``/``idempotency_key`` se generan solos; ``source_agent`` es metadata.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json as _json
 import sys
 import uuid
+from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -147,6 +149,71 @@ def link(
         typer.echo(_json.dumps(out, indent=2, ensure_ascii=False))
         return
     typer.secho(f"✓ {source_doc_id} -[{relation}]-> {target_doc_id}", fg=typer.colors.GREEN)
+
+
+class Voto(StrEnum):
+    up = "up"
+    down = "down"
+
+
+@write_app.command("feedback")
+def feedback(
+    query_id: Annotated[str, typer.Argument(help="query_id de find_code/find_notes.")],
+    voto: Annotated[Voto, typer.Argument(help="up: el hit sirvió · down: no sirvió.")],
+    rank: Annotated[int, typer.Option("--rank", min=1, help="Puesto del hit, desde 1.")],
+    path: Annotated[str | None, typer.Option("--path", help="Path del hit (find_code).")] = None,
+    doc_id: Annotated[
+        str | None, typer.Option("--doc-id", help="doc_id del hit (find_notes).")
+    ] = None,
+    vault: Annotated[str | None, typer.Option("--vault", help="Vault del hit.")] = None,
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+    profile: _Profile = None,
+    gateway_url: _Url = None,
+    api_key: _Key = None,
+) -> None:
+    """Vota un hit de una búsqueda: 👍 o 👎 sobre el resultado del puesto --rank.
+
+    Un 👍 con --path o --doc-id viaja como `expected` (lo que sí servía); un 👎 no.
+
+    El hit va en el comentario (`hit N: <ref>`). El mismo voto el mismo día UTC cuenta una vez.
+    """
+    try:
+        # La forma canónica es la que guarda query_log: otra grafía no se cruza con su consulta.
+        query_id = str(uuid.UUID(query_id))
+    except ValueError:
+        typer.secho(f"✗ {query_id!r} no es un query_id.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from None
+    ref = path or doc_id
+    body: dict[str, Any] = {
+        "target_kind": "retrieval",
+        "target_ref": query_id,
+        "signal": voto.value,
+        "rating": 1 if voto is Voto.up else -1,
+        "comment": f"hit {rank}: {ref}" if ref else f"hit {rank}",
+        "idempotency_key": hashlib.sha256(
+            "|".join(
+                [
+                    query_id,
+                    voto.value,
+                    str(rank),
+                    path or "",
+                    doc_id or "",
+                    datetime.now(UTC).date().isoformat(),
+                ]
+            ).encode()
+        ).hexdigest()[:36],
+    }
+    if vault:
+        body["vault"] = vault
+    if voto is Voto.up and ref:
+        expected = {k: v for k, v in (("path", path), ("doc_id", doc_id)) if v}
+        body["expected"] = {**expected, "rank": rank}
+    out = _post("/v1/feedback", body, profile, gateway_url, api_key)
+    if as_json:
+        typer.echo(_json.dumps(out, indent=2, ensure_ascii=False))
+        return
+    hecho = "ya estaba anotado" if out.get("status") == "already_recorded" else "anotado"
+    typer.secho(f"✓ {voto.value} {hecho}: hit {rank} de {query_id}", fg=typer.colors.GREEN)
 
 
 __all__ = ["write_app"]

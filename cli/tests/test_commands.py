@@ -497,3 +497,104 @@ def test_list_muestra_el_vencimiento(gateway: dict[str, Any]) -> None:
     assert "2026-09-15 VENCIDO" in res.output
     assert "2026-10-16 (5 d)" in res.output
     assert "DESCONOCIDO" in res.output
+
+
+_QID = "5af7e692-59db-4948-95cf-050c3b6afb52"
+
+
+def _feedback(gateway: dict[str, Any], *args: str, status: str = "recorded") -> dict[str, Any]:
+    import json as _json
+
+    _set(gateway, lambda r: httpx.Response(200, json={"status": status, "feedback_id": 1}))
+    res = runner.invoke(app, ["feedback", *args])
+    assert res.exit_code == 0, res.output
+    sent: dict[str, Any] = _json.loads(gateway["requests"][-1].content)
+    assert gateway["requests"][-1].url.path == "/v1/feedback"
+    return sent
+
+
+def test_feedback_up_de_find_code_viaja_como_expected(gateway: dict[str, Any]) -> None:
+    sent = _feedback(gateway, _QID, "up", "--rank", "3", "--path", "src/a.py", "--vault", "focusyn")
+    assert sent["target_kind"] == "retrieval" and sent["target_ref"] == _QID
+    assert sent["signal"] == "up" and sent["rating"] == 1
+    assert sent["expected"] == {"path": "src/a.py", "rank": 3}
+    assert sent["comment"] == "hit 3: src/a.py"
+    assert sent["vault"] == "focusyn"
+
+
+def test_feedback_up_de_find_notes_usa_el_doc_id(gateway: dict[str, Any]) -> None:
+    sent = _feedback(gateway, _QID, "up", "--rank", "1", "--doc-id", "DOC-DEC-001")
+    assert sent["expected"] == {"doc_id": "DOC-DEC-001", "rank": 1}
+
+
+def test_feedback_down_no_es_expected(gateway: dict[str, Any]) -> None:
+    sent = _feedback(gateway, _QID, "down", "--rank", "2", "--path", "src/b.py")
+    assert sent["signal"] == "down" and sent["rating"] == -1
+    assert "expected" not in sent
+    assert sent["comment"] == "hit 2: src/b.py"
+
+
+def test_feedback_sin_ref_deja_el_puesto_en_el_comentario(gateway: dict[str, Any]) -> None:
+    sent = _feedback(gateway, _QID, "up", "--rank", "4")
+    assert "expected" not in sent and sent["comment"] == "hit 4"
+
+
+def test_feedback_la_clave_distingue_hit_y_voto_y_repite_el_mismo(
+    gateway: dict[str, Any],
+) -> None:
+    claves = [
+        _feedback(gateway, _QID, v, "--rank", r, "--path", "src/a.py")["idempotency_key"]
+        for v, r in [("up", "1"), ("up", "1"), ("up", "2"), ("down", "1")]
+    ]
+    assert claves[0] == claves[1]
+    assert len(set(claves)) == 3
+
+
+def test_feedback_manda_el_query_id_en_su_forma_canonica(gateway: dict[str, Any]) -> None:
+    a = _feedback(gateway, _QID.upper(), "up", "--rank", "1")
+    b = _feedback(gateway, _QID.replace("-", ""), "up", "--rank", "1")
+    assert a["target_ref"] == b["target_ref"] == _QID
+    assert a["idempotency_key"] == b["idempotency_key"]
+
+
+def test_feedback_la_clave_distingue_el_doc_id_aunque_vaya_el_path(gateway: dict[str, Any]) -> None:
+    base = [_QID, "up", "--rank", "1", "--path", "a.md"]
+    a = _feedback(gateway, *base, "--doc-id", "DOC-001")["idempotency_key"]
+    b = _feedback(gateway, *base, "--doc-id", "DOC-002")["idempotency_key"]
+    assert a != b
+
+
+def test_feedback_ya_anotado_lo_dice(gateway: dict[str, Any]) -> None:
+    _set(gateway, lambda r: httpx.Response(200, json={"status": "already_recorded"}))
+    res = runner.invoke(app, ["feedback", _QID, "up", "--rank", "1"])
+    assert res.exit_code == 0 and "ya estaba anotado" in res.output
+
+
+def test_feedback_json_devuelve_la_respuesta_del_gateway(gateway: dict[str, Any]) -> None:
+    import json as _json
+
+    _set(gateway, lambda r: httpx.Response(200, json={"status": "recorded", "feedback_id": 9}))
+    res = runner.invoke(app, ["feedback", _QID, "down", "--rank", "1", "--json"])
+    assert _json.loads(res.output)["feedback_id"] == 9
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["no-es-uuid", "up", "--rank", "1"],
+        [_QID, "meh", "--rank", "1"],
+        [_QID, "up", "--rank", "0"],
+        [_QID, "up"],
+    ],
+)
+def test_feedback_rechaza_sin_llamar_al_gateway(gateway: dict[str, Any], args: list[str]) -> None:
+    _set(gateway, lambda r: httpx.Response(200, json={}))
+    res = runner.invoke(app, ["feedback", *args])
+    assert res.exit_code == 2
+    assert gateway["requests"] == []
+
+
+def test_feedback_un_error_del_gateway_sale_con_su_codigo(gateway: dict[str, Any]) -> None:
+    _set(gateway, lambda r: httpx.Response(403, json={"error": {}}))
+    res = runner.invoke(app, ["feedback", _QID, "up", "--rank", "1"])
+    assert res.exit_code != 0 and "403" in res.output
